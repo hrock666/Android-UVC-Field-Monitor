@@ -1,0 +1,13 @@
+libjpeg-turbo / TurboJPEG attribution
+=====================================
+
+This software is based in part on the work of the Independent JPEG Group.
+
+The project currently contains a prebuilt libturbojpeg.a identified by its
+bundled turbojpeg.h as TurboJPEG/libjpeg-turbo 3.2.0.
+
+Upstream project:
+https://github.com/libjpeg-turbo/libjpeg-turbo
+
+For publication, also keep the exact upstream LICENSE.md and README.ijg from
+the 3.2.0 source release with the distributed binary whenever practical.
