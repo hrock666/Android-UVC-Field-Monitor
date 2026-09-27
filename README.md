@@ -1,8 +1,8 @@
 # Android UVC Field Monitor
 
-Android端末を、USB Video Class（UVC）キャプチャデバイスと組み合わせて使用するための、実験的なフィールドモニター実装です。
+Android端末をUSB Video Class（UVC）キャプチャデバイスと組み合わせて使用するための、実験的なフィールドモニター実装です。
 
-一般的なAndroidの動画再生パイプラインに依存せず、USB入力からデコード、GPU描画、映像解析までをNative C++中心で構成し、**低レイテンシ・最新フレーム優先・リアルタイム映像解析**を重視しています。
+一般的なAndroid動画再生パイプラインに依存せず、USB入力からMJPEGデコード、GPU描画、映像解析までをNative C++中心で構成し、**低レイテンシ・最新フレーム優先・リアルタイム映像解析**を重視しています。
 
 現在は主に **MS2109 / MS2130 系USBキャプチャデバイス**を対象として開発・検証しています。
 
@@ -20,17 +20,22 @@ Android端末を、USB Video Class（UVC）キャプチャデバイスと組み�
 
 このプロジェクトでは、Android端末を簡易的な映像確認用ディスプレイではなく、映像信号を解析できる**フィールドモニター**として使用することを目標としています。
 
-主な設計方針は以下の通りです。
+主な設計方針：
 
 - UVC映像入力の低レイテンシ処理
 - FIFOに古いフレームを滞留させない
 - 完全なフレーム保持よりも「現在に近い映像」を優先
-- Native C++によるUSBキャプチャ処理
+- Native C++によるUSBキャプチャ
 - OpenGL ESによるGPU描画
 - CPUコピーの削減
-- YUYV / MJPEG入力への対応
+- 1280×720 MJPEG入力
+- ISO / BULK transportの自動選択
+- TurboJPEGによるplanar YCbCr 4:2:2 decode
 - GPUを利用したリアルタイム映像解析
+- SDR / HDR(PQ) Preview
 - 実機上でのレイテンシ計測と最適化
+
+旧720×480 YUYV fallbackは現行baselineから削除し、MS2109 / MS2130とも共通の720p60 MJPEG decode/render経路を使用します。
 
 ---
 
@@ -40,19 +45,41 @@ Android端末を、USB Video Class（UVC）キャプチャデバイスと組み�
 
 - libusbを使用したNative UVCキャプチャ
 - 非同期USB転送
-- 最新フレーム優先のフレーム管理
+- UVC VideoStreaming interface / endpoint探索
+- ISO / BULK transfer type判定
 - MS2109 / MS2130系デバイス向け処理
-- YUYV入力
-- MJPEG入力
+- 1280×720 MJPEG 約60 fps
+- latest pending JPEG
 - TurboJPEGによるMJPEGデコード
+- decode失敗フレームのdrop
 
 ### 映像表示
 
 - OpenGL ESによるNative描画
+- planar Y / Cb / Cr 3-plane texture
 - アスペクト比維持
 - フルスクリーン表示
 - イベント駆動レンダリング
 - 最新フレーム優先表示
+- Persistent Mapped PBO ×2
+
+### HDR Preview
+
+入力modeがPQとして既知・選択されている場合、PreviewのみHDR→SDR変換を行います。
+
+```text
+YCbCr
+  ↓
+PQ EOTF
+  ↓
+HDR-to-SDR Tone Mapping
+  ↓
+BT.2020 → BT.709
+  ↓
+sRGB
+```
+
+Scope側にはPQ EOTF / Tone Mappingを入れず、decoded source-domainのcode valueを保持します。
 
 ### 映像スコープ
 
@@ -71,25 +98,29 @@ Android端末を、USB Video Class（UVC）キャプチャデバイスと組み�
 
 ```mermaid
 flowchart LR
-    A[UVC Capture Device<br/>MS2109 / MS2130]
-    B[libusb<br/>Async Transfer]
-    C{YUYV / MJPEG}
-    D[TurboJPEG<br/>MJPEG Decode]
-    E[Latest Frame<br/>Old Frames Dropped]
-    F[OpenGL ES<br/>GPU Processing]
-    G[Preview]
-    H[Waveform / RGB Parade<br/>Histogram / Vectorscope]
-    I[Android Display]
+    A[MS2109 / MS2130<br/>UVC Capture]
+    B{USB Transport}
+    C[Isochronous]
+    D[Bulk]
+    E[Common UVC MJPEG Parser]
+    F[Latest Pending JPEG]
+    G[TurboJPEG<br/>YCbCr 4:2:2]
+    H[Latest Decoded Frame]
+    I[Persistent PBO]
+    J[3-plane GL_R8]
+    K[Preview]
+    L[GPU Scopes]
+    M[Android Display]
 
-    A --> B --> C
-    C -->|YUYV| E
-    C -->|MJPEG| D --> E
-    E --> F
-    F --> G --> I
-    F --> H --> I
+    A --> B
+    B --> C --> E
+    B --> D --> E
+    E --> F --> G --> H --> I --> J
+    J --> K --> M
+    J --> L --> M
 ```
 
-本プロジェクトでは、処理が一時的に表示周期へ追いつかなくなった場合でも、古い映像を順番に表示するのではなく、可能な限り**最新の入力フレームへ追従すること**を優先しています。
+USB transportだけを分離し、UVC MJPEG payload以降のdecode / render / scope処理は共通化しています。
 
 ---
 
@@ -103,9 +134,39 @@ flowchart LR
 
 ことを重視します。
 
-そのため本プロジェクトでは、入力されたフレームを無条件にFIFOへ蓄積するのではなく、**最新フレームを優先し、処理が追いつかない場合は古いフレームを破棄する**設計を採用しています。
+そのため本プロジェクトでは、入力フレームをFIFOへ蓄積せず、**最新フレームを優先し、処理が追いつかない場合は古いフレームを破棄**します。
 
-USB入力、デコード、GPU転送、レンダリング、Presentationまでを個別に計測できるようにし、ボトルネックを確認しながら最適化しています。
+```text
+latest wins
+busy -> skip
+no video FIFO
+```
+
+decode error frameはrendererへpublishせず、前回の正常表示を保持します。
+
+---
+
+## Diagnostic / Logging
+
+通常運用ではLogcat出力を抑え、主に以下を残します。
+
+```text
+USB transport statistics
+TurboJPEG statistics
+warning / error
+```
+
+per-frame latency、Presentation詳細、Scope queue、Colorbar / Range diagnosticは通常無効です。
+
+---
+
+## Android端末依存性
+
+UVC動作はキャプチャデバイスだけでなく、Android端末側のUSB Host、VBUS、OTGアダプタ、コネクタ、USB PHY / signal integrity等にも依存します。
+
+MS2109系の実機評価では、同一キャプチャデバイス・同一映像でもAndroid端末を変更するとMJPEG decode error / 局所フリッカーが再現しなくなるケースを確認しています。
+
+このケースではthermal要因は再現せず、端末側hardware条件の影響が疑われます。電源品質とsignal integrityのどちらが支配的かは未確定です。
 
 ---
 
@@ -145,7 +206,7 @@ arm64-v8a
 
 です。
 
-現在同梱している `libturbojpeg.a` が `arm64-v8a` 用であるため、Gradle側でもABIを明示的に制限しています。
+現在同梱している`libturbojpeg.a`が`arm64-v8a`用であるため、Gradle側でもABIを明示的に制限しています。
 
 ```kotlin
 defaultConfig {
@@ -197,17 +258,13 @@ Upstream:
 https://github.com/libusb/libusb
 ```
 
-本リポジトリでは公式upstreamの `v1.0.30` タグを使用しています。
-
 License:
 
 ```text
 LGPL-2.1-or-later
 ```
 
-libusbはアプリケーション本体とは分離した共有ライブラリ `usb-1.0` としてビルドし、Native側からリンクしています。
-
----
+libusbはアプリケーション本体とは分離した共有ライブラリ`usb-1.0`としてビルドし、Native側からリンクしています。
 
 ### libjpeg-turbo / TurboJPEG
 
@@ -219,7 +276,7 @@ MJPEGデコードにはlibjpeg-turboのTurboJPEG APIを使用しています。
 libjpeg-turbo 3.2.0
 ```
 
-現在は `arm64-v8a` 向けの `libturbojpeg.a` を使用しています。
+現在は`arm64-v8a`向けの`libturbojpeg.a`を使用しています。
 
 Upstream:
 
@@ -227,7 +284,7 @@ Upstream:
 https://github.com/libjpeg-turbo/libjpeg-turbo
 ```
 
-ライセンス情報については以下を参照してください。
+ライセンス情報：
 
 ```text
 THIRD_PARTY_NOTICES.md
@@ -242,8 +299,6 @@ This software is based in part on the work of the Independent JPEG Group.
 ## ライセンス
 
 UvcFieldMonitorのオリジナルコードは **MIT License** のもとで公開しています。
-
-詳細は以下を参照してください。
 
 ```text
 LICENSE
@@ -278,7 +333,8 @@ MIT Licenseがlibusbやlibjpeg-turboのコードへ適用されるものでは�
 
 - UVCデバイスの実装
 - USB転送方式
-- Android端末のUSBホスト性能
+- Android端末のUSB Host性能
+- VBUS / OTG / cable / signal integrity
 - GPU / OpenGL ES実装
 - ディスプレイのリフレッシュレート
 - Androidの描画・Presentation経路
@@ -286,7 +342,7 @@ MIT Licenseがlibusbやlibjpeg-turboのコードへ適用されるものでは�
 
 すべてのUVCデバイスおよびAndroid端末での動作を保証するものではありません。
 
-MS2109 / MS2130系デバイスについても、製品やファームウェアによって挙動が異なる可能性があります。
+MS2109 / MS2130系デバイスについても、製品やファームウェア、接続するAndroid hostによって挙動が異なる可能性があります。
 
 ---
 
@@ -295,7 +351,7 @@ MS2109 / MS2130系デバイスについても、製品やファームウェア�
 ```text
 UvcFieldMonitor/
 ├─ README.md
-├─ README_ja.md
+├─ README_en.md
 ├─ LICENSE
 ├─ THIRD_PARTY_NOTICES.md
 ├─ LICENSES/
@@ -310,6 +366,11 @@ UvcFieldMonitor/
 ├─ app/
 │  └─ src/main/
 │     └─ cpp/
+│        ├─ uvc_device.cpp
+│        ├─ uvc_stream.cpp
+│        ├─ uvc_mjpeg_decoder.cpp
+│        ├─ scope_gpu.cpp
+│        ├─ scope_ui.cpp
 │        └─ third_party/
 │           ├─ libusb/
 │           └─ libjpeg-turbo/
@@ -326,4 +387,6 @@ UvcFieldMonitor/
 
 開発中。
 
-低レイテンシUVC入力、Native描画、映像スコープ、およびMS2109/MS2130系キャプチャデバイスでの実機検証を継続しています。
+現在のbaselineは、**MS2109 / MS2130の1280×720p60 MJPEG入力を共通TurboJPEG / planar YCbCr / OpenGL ES経路で処理する構成**です。
+
+低レイテンシUVC入力、HDR Preview、GPU映像スコープ、および複数Android hostでの実機検証を継続しています。

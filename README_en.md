@@ -2,7 +2,7 @@
 
 An experimental field-monitor implementation for Android devices combined with USB Video Class (UVC) capture devices.
 
-Instead of relying on a typical Android video playback pipeline, the project handles USB capture, decoding, GPU rendering, and video analysis primarily in native C++. The design prioritizes **low latency, latest-frame processing, and real-time video scopes**.
+Instead of relying on a typical Android video playback pipeline, the project handles USB capture, MJPEG decoding, GPU rendering, and video analysis primarily in native C++. The design prioritizes **low latency, latest-frame processing, and real-time video scopes**.
 
 Development and validation currently focus mainly on **MS2109 / MS2130-class USB capture devices**.
 
@@ -22,15 +22,20 @@ The goal of this project is to use an Android device not merely as a video previ
 
 Key design goals:
 
-- Low-latency UVC video capture
-- Prevent stale frames from accumulating in FIFO queues
-- Prefer the most recent frame over complete frame preservation
+- Low-latency UVC capture
+- No stale-frame accumulation in FIFO queues
+- Prefer the newest frame over complete frame preservation
 - Native C++ USB capture
 - OpenGL ES GPU rendering
 - Reduced CPU-side copying
-- YUYV / MJPEG input support
+- 1280×720 MJPEG input
+- ISO / BULK transport selection from descriptors
+- TurboJPEG planar YCbCr 4:2:2 decoding
 - GPU-assisted real-time video analysis
+- SDR / HDR(PQ) preview
 - On-device latency measurement and optimization
+
+The legacy 720×480 YUYV fallback has been removed from the current baseline. MS2109 / MS2130-class devices now share the same 720p60 MJPEG decode/render path.
 
 ---
 
@@ -40,19 +45,41 @@ Key design goals:
 
 - Native UVC capture using libusb
 - Asynchronous USB transfers
-- Latest-frame-first frame management
-- Device-specific handling for MS2109 / MS2130-class hardware
-- YUYV input
-- MJPEG input
+- UVC VideoStreaming interface / endpoint discovery
+- ISO / BULK transfer-type selection
+- MS2109 / MS2130-class device handling
+- 1280×720 MJPEG at approximately 60 fps
+- Latest-pending JPEG semantics
 - MJPEG decoding via TurboJPEG
+- Decode-failed frames are dropped
 
 ### Video display
 
-- Native rendering with OpenGL ES
+- Native OpenGL ES rendering
+- Planar Y / Cb / Cr 3-plane textures
 - Aspect-ratio preservation
 - Full-screen rendering
 - Event-driven rendering
 - Latest-frame-first presentation
+- Persistent mapped PBO ×2
+
+### HDR preview
+
+When the input mode is known or selected as PQ, HDR-to-SDR conversion is applied to the preview path only.
+
+```text
+YCbCr
+  ↓
+PQ EOTF
+  ↓
+HDR-to-SDR Tone Mapping
+  ↓
+BT.2020 → BT.709
+  ↓
+sRGB
+```
+
+The scope path does not apply PQ EOTF or tone mapping. It keeps decoded source-domain code values.
 
 ### Video scopes
 
@@ -63,7 +90,7 @@ Currently implemented:
 - Histogram
 - Vectorscope
 
-These scopes are intended for field exposure checks, signal-level checks, and color-distribution monitoring directly on an Android device.
+The scopes are intended for field exposure checks, signal-level checks, and color-distribution monitoring directly on an Android device.
 
 ---
 
@@ -71,25 +98,29 @@ These scopes are intended for field exposure checks, signal-level checks, and co
 
 ```mermaid
 flowchart LR
-    A[UVC Capture Device<br/>MS2109 / MS2130]
-    B[libusb<br/>Async Transfer]
-    C{YUYV / MJPEG}
-    D[TurboJPEG<br/>MJPEG Decode]
-    E[Latest Frame<br/>Old Frames Dropped]
-    F[OpenGL ES<br/>GPU Processing]
-    G[Preview]
-    H[Waveform / RGB Parade<br/>Histogram / Vectorscope]
-    I[Android Display]
+    A[MS2109 / MS2130<br/>UVC Capture]
+    B{USB Transport}
+    C[Isochronous]
+    D[Bulk]
+    E[Common UVC MJPEG Parser]
+    F[Latest Pending JPEG]
+    G[TurboJPEG<br/>YCbCr 4:2:2]
+    H[Latest Decoded Frame]
+    I[Persistent PBO]
+    J[3-plane GL_R8]
+    K[Preview]
+    L[GPU Scopes]
+    M[Android Display]
 
-    A --> B --> C
-    C -->|YUYV| E
-    C -->|MJPEG| D --> E
-    E --> F
-    F --> G --> I
-    F --> H --> I
+    A --> B
+    B --> C --> E
+    B --> D --> E
+    E --> F --> G --> H --> I --> J
+    J --> K --> M
+    J --> L --> M
 ```
 
-If the processing pipeline temporarily falls behind the input rate, the system does not try to display every stale frame in sequence. It instead prioritizes following the **most recent available input frame**.
+Only the USB transport is separated. UVC MJPEG parsing, decoding, rendering, and scope processing are shared after the transport layer.
 
 ---
 
@@ -101,9 +132,39 @@ For a field monitor, however, the more important requirement is:
 
 > Show what the camera is seeing now as quickly as possible.
 
-For that reason, this project does not blindly preserve every incoming frame in a FIFO queue. When processing falls behind, **older frames may be discarded so that rendering can catch up to the latest frame**.
+The project therefore avoids building a normal video FIFO. When processing falls behind, older frames can be discarded so that rendering catches up to the latest frame.
 
-The pipeline is structured so that USB input, decoding, GPU upload, rendering, and presentation can be measured separately, allowing latency bottlenecks to be identified and optimized.
+```text
+latest wins
+busy -> skip
+no video FIFO
+```
+
+Frames that fail JPEG decoding are not published to the renderer, so the previous valid image remains visible.
+
+---
+
+## Diagnostics / logging
+
+Normal builds keep Logcat output relatively quiet and retain mainly:
+
+```text
+USB transport statistics
+TurboJPEG statistics
+warning / error
+```
+
+Per-frame latency, detailed presentation timing, scope-queue logs, and Colorbar / Range diagnostics are disabled by default.
+
+---
+
+## Android host dependency
+
+UVC behavior depends not only on the capture device but also on the Android USB host implementation, VBUS quality, OTG adapter, connector, cable, USB PHY, and signal integrity.
+
+During MS2109-class testing, a case was observed in which MJPEG decode errors and localized flicker occurred on one Android host but disappeared when the same capture hardware and source were moved to another Android device.
+
+Thermal behavior did not reproduce the issue in that case, so host-side hardware conditions are suspected. Whether power quality or signal integrity is dominant remains unconfirmed.
 
 ---
 
@@ -151,7 +212,7 @@ defaultConfig {
 }
 ```
 
-Supporting additional ABIs requires corresponding TurboJPEG binaries for those ABIs.
+Supporting additional ABIs requires corresponding TurboJPEG binaries.
 
 ---
 
@@ -167,7 +228,7 @@ Main requirements:
 - arm64-v8a Android device
 - UVC-compatible USB capture device
 
-Because this project contains native code, an Android NDK environment is required in addition to a normal Android/Kotlin development setup.
+Because the project contains native code, an Android NDK environment is required in addition to a normal Android/Kotlin setup.
 
 ---
 
@@ -193,8 +254,6 @@ Upstream:
 https://github.com/libusb/libusb
 ```
 
-This repository uses the official upstream `v1.0.30` tag.
-
 License:
 
 ```text
@@ -202,8 +261,6 @@ LGPL-2.1-or-later
 ```
 
 libusb is built as a separate shared library (`usb-1.0`) and linked from the application's native library.
-
----
 
 ### libjpeg-turbo / TurboJPEG
 
@@ -239,8 +296,6 @@ This software is based in part on the work of the Independent JPEG Group.
 
 Original UvcFieldMonitor source code is released under the **MIT License**.
 
-See:
-
 ```text
 LICENSE
 ```
@@ -262,7 +317,7 @@ This repository distributes **source code only**.
 
 Prebuilt APK/AAB packages are not currently planned.
 
-Behavior and latency may vary depending on the Android device, operating system, USB host controller, capture hardware, GPU, and display pipeline.
+Behavior and latency may vary depending on the Android device, operating system, USB host controller, capture hardware, GPU, display pipeline, and physical USB connection.
 
 ---
 
@@ -275,6 +330,7 @@ Behavior may depend on:
 - UVC device implementation
 - USB transfer mode
 - Android USB host performance
+- VBUS / OTG adapter / cable / signal integrity
 - GPU / OpenGL ES implementation
 - Display refresh rate
 - Android rendering/presentation path
@@ -282,7 +338,7 @@ Behavior may depend on:
 
 Operation is not guaranteed on every UVC device or Android device.
 
-MS2109 / MS2130-class devices may also behave differently depending on product implementation and firmware.
+MS2109 / MS2130-class devices may also behave differently depending on product implementation, firmware, and the Android host they are connected to.
 
 ---
 
@@ -291,7 +347,7 @@ MS2109 / MS2130-class devices may also behave differently depending on product i
 ```text
 UvcFieldMonitor/
 ├─ README.md
-├─ README_ja.md
+├─ README_en.md
 ├─ LICENSE
 ├─ THIRD_PARTY_NOTICES.md
 ├─ LICENSES/
@@ -306,6 +362,11 @@ UvcFieldMonitor/
 ├─ app/
 │  └─ src/main/
 │     └─ cpp/
+│        ├─ uvc_device.cpp
+│        ├─ uvc_stream.cpp
+│        ├─ uvc_mjpeg_decoder.cpp
+│        ├─ scope_gpu.cpp
+│        ├─ scope_ui.cpp
 │        └─ third_party/
 │           ├─ libusb/
 │           └─ libjpeg-turbo/
@@ -322,4 +383,6 @@ UvcFieldMonitor/
 
 Under development.
 
-Low-latency UVC input, native rendering, video scopes, and real-device validation with MS2109 / MS2130-class capture hardware are continuing.
+The current baseline processes **1280×720p60 MJPEG from MS2109 / MS2130-class devices through a shared TurboJPEG / planar YCbCr / OpenGL ES pipeline**.
+
+Validation continues for low-latency UVC capture, HDR preview, GPU video scopes, and behavior across multiple Android USB hosts.

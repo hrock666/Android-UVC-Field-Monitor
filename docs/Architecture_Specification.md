@@ -3,7 +3,7 @@
 ## Architecture Specification — Current Baseline
 
 **Revision:** 2026-09-27  
-**Status:** MS2109互換経路 + MS2130 720p60/HDR(PQ)経路統合版  
+**Status:** MS2109 / MS2130 1280×720p60 MJPEG共通パイプライン統合版  
 **Primary implementation:** Native C++ / libusb / TurboJPEG / OpenGL ES
 
 ---
@@ -12,7 +12,7 @@
 
 Android端末をUSB Video Class（UVC）キャプチャデバイスと組み合わせ、低レイテンシのフィールドモニターとして構成する。
 
-一般的なAndroid動画再生経路やMediaCodec系パイプラインを使用せず、USB入力からGPU描画・映像解析までをNative中心で実装する。
+一般的なAndroid動画再生経路やMediaCodec系パイプラインを使用せず、USB入力からMJPEG decode、GPU描画、映像解析までをNative中心で実装する。
 
 重視する項目：
 
@@ -24,9 +24,9 @@ Android端末をUSB Video Class（UVC）キャプチャデバイスと組み合�
 - GPU内での映像処理
 - Scope処理をPreview critical pathから分離
 - Waveform / RGB Parade / Histogram / Vectorscope
-- Zebra / Peaking / False Color等への拡張性
 - SDR / HDR(PQ)入力への対応
 - 実測値に基づくレイテンシ評価
+- USB transportと映像decode/render処理の責務分離
 
 本システムでは「全フレームを順番通り表示すること」よりも、リアルタイム監視における「現在に近い映像」を優先する。
 
@@ -37,6 +37,7 @@ latest wins
 busy -> wait ではなく busy -> skip
 no video FIFO
 measurement != preview processing
+transport != decoder
 ```
 
 ---
@@ -78,7 +79,7 @@ A202ZTでは`AHARDWAREBUFFER_USAGE_FRONT_BUFFER`がvendor Gralloc側で拒否さ
 
 ### 2.1.2 Teclast P30T / Unisoc T7250
 
-Android 16移植・次期評価端末。
+Android 16移植・評価端末。
 
 ```text
 Device      : Teclast P30T
@@ -89,14 +90,13 @@ GMS         : 搭載
 Root        : 前提としない
 ```
 
-本機ではA202ZT固有のMali/Gralloc挙動を前提にせず、Android標準API / NDK APIで成立する構成を維持する。
+A202ZT固有のMali/Gralloc挙動を前提にせず、Android標準API / NDK APIで成立する構成を維持する。
 
 主な評価対象：
 
 - USB Host API → native FD受け渡し
-- libusb bulk / isochronous転送
-- MS2109 YUYV 30 fps
-- MS2130 MJPEG 60 fps
+- libusb Bulk / Isochronous転送
+- MS2109 / MS2130 1280×720 MJPEG 約60 fps
 - TurboJPEG decode性能
 - OpenGL ES 3.1+ Compute Shader
 - Persistent mapped PBO
@@ -111,7 +111,7 @@ Root        : 前提としない
 
 ### Unisoc機での設計方針
 
-Unisoc機専用コードを増やすのではなく、
+端末固有コードを増やすのではなく、
 
 ```text
 Capability Probe
@@ -127,48 +127,53 @@ unsupported
 
 root、vendor private API、端末固有system propertyへの依存は基本的に避ける。
 
-Android 16 / API 36ではStep 15DのFront Buffer / SurfaceControl経路を評価対象とするが、**実機での対応可否とレイテンシ改善量は未確定**とする。
+Android 16 / API 36ではStep 15DのFront Buffer / SurfaceControl経路を評価対象とするが、対応可否とレイテンシ改善量は実機検証前提とする。
 
 ---
 
 ## 2.2 UVCキャプチャデバイス
 
-現在はMacroSilicon系の2経路を維持する。
+現在はMacroSilicon系のMS2109 / MS2130クラスを主対象とする。
 
-| Device | Format | Resolution / FPS | USB transport | 主用途 |
+現行実装ではデバイス名だけで転送方式を固定せず、UVC VideoStreaming interfaceとendpoint descriptorを探索し、**ISO / BULK transportを判定する**。
+
+代表的な構成：
+
+| Device class | UVC Format | Resolution / FPS | Typical USB transport | Decode / Render |
 |---|---|---|---|---|
-| MS2109 | YUYV / YUY2 | 720×480 @ 30 | USB 2.0 HS Isochronous | SDR互換ベースライン |
-| MS2130 | MJPEG | 1280×720 @ 約60 | USB 2.0 HS Bulk | 現行主経路 / HDR(PQ) |
+| MS2109-class | MJPEG | 1280×720 @ 約60 | USB 2.0 HS Isochronous | 共通MJPEG pipeline |
+| MS2130-class | MJPEG | 1280×720 @ 約60 | USB 2.0 HS Bulk | 共通MJPEG pipeline |
+
+旧720×480 YUYV fallbackは現行baselineから削除済みであり、1280×720 MJPEGを必須入力とする。
 
 ---
 
-### 2.2.1 MS2109
+### 2.2.1 MS2109-class
 
-USB識別：
+代表的なUSB識別例：
 
 ```text
 VID : 0x534D
 PID : 0x2109
 ```
 
-映像条件：
+ただしtransport選択はVID/PIDのみで決定せず、UVC VS interface / endpoint descriptorを基準とする。
+
+代表的なISO構成：
 
 ```text
-Resolution    : 720 × 480
-Pixel Format  : YUYV / YUY2
-Frame Rate    : 30 fps
-Frame Size    : 691,200 bytes
-Data Rate     : 約20.736 MB/s / 165.9 Mbps
+UVC Format    : MJPEG
+Resolution    : 1280 × 720
+Frame Rate    : 約60 fps
 Transport     : USB 2.0 High-Speed Isochronous
-Interface     : 1
-Alt Setting   : 3
-Max Payload   : 3072 bytes / microframe
-Frame Interval: 333333
+Endpoint      : 0x83 IN
+Transfers     : 12
+Packets/Tx    : 8
 ```
 
-#### Processing Unit固定値
+MS2109ではProcessing Unit controlを使用する構成があるため、VideoControl descriptorからProcessing Unit IDを探索し、必要なcontrolのみ適用する。
 
-起動時に以下へ固定する。
+既存評価で使用した代表値：
 
 ```text
 brightness = 0
@@ -177,25 +182,23 @@ saturation = 132
 hue        = 0
 ```
 
-Processing Unit IDは固定値ではなくVideoControl descriptorから探索する。
-
-各Controlについて、
+Control設定時は可能な範囲で、
 
 ```text
 SET_CUR
   ↓
 GET_CUR
   ↓
-設定値完全一致
+設定値確認
 ```
 
-まで確認する。
+まで実施する。
 
 ---
 
-### 2.2.2 MS2130
+### 2.2.2 MS2130-class
 
-現行主経路。
+代表構成：
 
 ```text
 Input       : HDMI
@@ -207,19 +210,25 @@ Decode      : TurboJPEG
 Output      : planar YCbCr 4:2:2 / 8-bit
 ```
 
-現行descriptor処理ではMS2130をMS2109と分離し、Bulk endpointを使用する。
-
-代表的な実測：
+代表的な実測例：
 
 ```text
 fps              ≈ 59–60 fps
-USB throughput   ≈ 5.9 MiB/s
-JPEG size        ≈ 104 KB/frame
-wireFrame        ≈ 13.2–13.4 ms
-inflight         = 7
+JPEG size        : source依存
+wireFrame        ≈ 13 ms級
 ```
 
-MS2109用Processing Unit固定値はMS2130には適用しない。
+MS2109向けProcessing Unit固定値はMS2130-classへ機械的に適用しない。
+
+---
+
+## 2.3 Android Host依存性
+
+UVCデバイス単体だけでなく、Android端末側のUSB Host実装、VBUS品質、GND、OTGアダプタ、コネクタ、USB PHY / signal integrityの影響を受ける。
+
+MS2109-classの評価では、同一キャプチャデバイス・同一映像でもAndroid端末を変更するとMJPEG decode error / 下部フリッカーが再現しなくなるケースを確認した。
+
+このケースではthermal要因は再現せず、端末側hardware条件の影響が疑われる。ただし、電源品質とsignal integrityのどちらが支配的かは未確定とする。
 
 ---
 
@@ -243,16 +252,17 @@ Native C++側：
 - UVC payload parser
 - MJPEG frame assembler
 - TurboJPEG decode
-- 最新フレーム管理
+- latest decoded frame管理
 - Persistent mapped PBO
 - EGL
 - OpenGL ES
-- YUYV / planar YCbCr texture upload
+- planar YCbCr texture upload
 - Preview shader
 - HDR/PQ Preview processing
 - GPU Scope処理
 - Presentation timing
 - レイテンシ計測
+- UVC / decoder error statistics
 
 libusbはAndroid USB Host APIから取得したFDを使用し、Android側でlibusb独自のdevice discoveryは行わない。
 
@@ -264,170 +274,137 @@ LIBUSB_OPTION_NO_DEVICE_DISCOVERY
 
 # 4. 全体アーキテクチャ
 
-## 4.1 MS2109互換経路
+現行baselineでは、**USB transportのみ分離し、UVC MJPEG payload以降を共通化**する。
 
 ```text
-HDMI Source
-    │
-    ▼
-MS2109
-    │
-    │ UVC YUYV 720×480@30
-    │ USB 2.0 HS Isochronous
-    ▼
-libusb Async Isochronous
-    │
-    ▼
-UVC Payload Parser
-    │
-    ▼
-Frame Assembler
-    │
-    ▼
-Latest-Frame Triple Buffer
-    │
-    ▼
-Persistent Mapped PBO ×2
-    │
-    ▼
-Packed YUYV Texture
-RGBA8 360×480
-    │
-    ├─ Preview Fragment Shader
-    │    └─ BT.601 limited YUYV → RGB
-    │
-    └─ Scope Compute Shader
-         ├─ Waveform
-         ├─ RGB Parade
-         ├─ Histogram
-         └─ Vectorscope
+MS2109-class
+ISO transport ─────┐
+                   │
+                   ├─> Common UVC MJPEG Payload Parser
+                   │            ↓
+MS2130-class       │       MJPEG Frame Assembler
+BULK transport ────┘            ↓
+                         Latest Pending JPEG
+                                ↓
+                          TurboJPEG Worker
+                                ↓
+                     planar YCbCr 4:2:2 8-bit
+                                ↓
+                      Latest Decoded Frame Slots
+                                ↓
+                      Persistent Mapped PBO ×2
+                                ↓
+                     3-plane GL_R8 Textures
+                         ┌──────┴──────┐
+                         ↓             ↓
+                    Scope Path     Preview Path
+                  source-domain   display-domain
+                         ↓             ↓
+                    GPU Compute   Fragment Shader
+                         └──────┬──────┘
+                                ↓
+                         GLES UI Composition
+                                ↓
+                      EGL / BufferQueue
+                     or Front Buffer path
 ```
 
----
-
-## 4.2 MS2130現行経路
+重要な責務分離：
 
 ```text
-HDMI Source
-    │
-    │ SDR or HDR / ST2084 PQ
-    ▼
-MS2130
-    │
-    │ UVC MJPEG 1280×720@≈60
-    │ USB 2.0 HS Bulk
-    ▼
-Bulk Transfer / UVC Payload Parser
-    │
-    ▼
-MJPEG Frame Assembler
-    │
-    ▼
-Latest pending JPEG
-    │
-    ▼
-TurboJPEG Worker
-    │
-    │ planar YCbCr 4:2:2
-    ▼
-Latest Decoded Frame Slots
-    │
-    ▼
-Persistent Mapped PBO ×2
-    │
-    ▼
-3-plane GL_R8 textures
-    │
-    ├───────────────────────┐
-    │                       │
-    ▼                       ▼
-Scope Path              Preview Path
-source-domain           display-domain
-    │                       │
-    ▼                       ▼
-GPU Compute             Fragment Shader
-    │                       │
-    └──────────┬────────────┘
-               ▼
-        GLES UI Composition
-               │
-        ┌──────┴────────┐
-        │               │
-        ▼               ▼
-EGL / BufferQueue   Step15D Front Buffer
-(default/fallback)  (Android 16 experiment)
+ISO / BULK
+= USB transportの違い
+
+MJPEG parser / TurboJPEG / renderer / scope
+= 共通処理
 ```
 
 ---
 
 # 5. USB / UVC Transport
 
-## 5.1 MS2109 Isochronous
+## 5.1 Endpoint選択
 
-構成：
+UVC VideoStreaming interfaceを探索し、対象endpointのtransfer typeを確認する。
+
+概念：
+
+```text
+VID / PID
+   ↓
+UVC VS interface探索
+   ↓
+IN endpoint探索
+   ↓
+ISO  -> ISO backend
+BULK -> BULK backend
+```
+
+デバイス名だけでbackendを固定しない。
+
+---
+
+## 5.2 Isochronous backend
+
+MS2109-classで主に使用する。
+
+代表構成：
 
 ```text
 12 transfers
 ×
 8 iso packets
-×
-3072 bytes
 ```
 
 複数transferを常時in-flightとし、専用libusb event threadでcompletionを処理する。
 
-UVC payload headerから以下を判定：
+各完了ISO packetはUVC headerを保持したまま共通`uvc_mjpeg_decoder`へ渡す。
 
-- FID
-- EOF
-- Error
-- Payload length
-
-フレーム境界はEOFを基本とし、FID toggleも有効な境界として利用する。
+ISO transport側はJPEG decodeやrenderer用frame formatを持たない。
 
 ---
 
-## 5.2 MS2130 Bulk
+## 5.3 Bulk backend
 
-MS2130はBulk streamingとして扱う。
+MS2130-classで主に使用する。
 
-設計方針：
+Bulk completionで受信したUVC payloadを共通`uvc_mjpeg_decoder`へ渡す。
 
-```text
-USB completion
-    ↓
-UVC payload parser
-    ↓
-MJPEG bytes append
-    ↓
-EOF / FID boundary
-    ↓
-completed JPEG
-```
+Bulk側もJPEG decodeを所有せず、transportに限定する。
 
-JPEG queueを通常FIFOとして成長させない。
+---
 
-decode workerが処理中に新しいJPEGが完成した場合は、pending JPEGを最新フレームへ置換できる構造とする。
+## 5.4 UVC Payload
 
-```text
-old pending JPEG
-      ↓ replace
-newest pending JPEG
-```
+共通parserでは以下を確認する。
 
-これによりdecode負荷上昇時もqueue latencyを蓄積しない。
+- header length
+- FID
+- EOF
+- UVC STREAM ERR
+- payload bytes
+- SOI / EOI
+- maximum compressed frame size
+
+UVC payload error付きframe、EOI不成立frame、上限超過frameはdecode queueへ公開しない。
 
 ---
 
 # 6. MJPEG / TurboJPEG Decode
 
-MS2130 MJPEGはTurboJPEGで直接planar YCbCr 4:2:2へdecodeする。
+共通decoderは`uvc_mjpeg_decoder`とする。
 
 ```text
-JPEG bitstream
-      ↓
+UVC payload
+    ↓
+MJPEG assembler
+    ↓
+completed JPEG
+    ↓
+latest pending semantics
+    ↓
 TurboJPEG
-      ↓
+    ↓
 Y plane  : 1280×720
 Cb plane :  640×720
 Cr plane :  640×720
@@ -443,8 +420,6 @@ YCbCr 4:2:2
 GPU
 ```
 
-とし、CPU RGB conversionを省く。
-
 メモリlayout：
 
 ```text
@@ -455,23 +430,23 @@ Cr   :  640 × 720 = 460,800 bytes
 Total = 1,843,200 bytes / frame
 ```
 
-代表実測：
+decoderは以下を要求する。
 
 ```text
-TurboJPEG decodeCall
-avg       ≈ 6–7 ms
-p95       ≈ 8–9 ms
-
-B0 → B2
-avg       ≈ 20 ms
+width      = 1280
+height     = 720
+subsampling= TJSAMP_422
+colorspace = YCbCr
 ```
 
-概念上：
+decode失敗frameはREADYへpublishしない。
 
 ```text
-B0 = MS2130 wire frame受信開始側
-B2 = TurboJPEG decode完了 / decoded frame publish
+decode success -> READY
+decode failure -> DROP / slot FREE
 ```
+
+queueをFIFOとして成長させず、worker処理中に新しいJPEGが完成した場合はpendingを最新へ置換できる。
 
 ---
 
@@ -479,56 +454,53 @@ B2 = TurboJPEG decode完了 / decoded frame publish
 
 ## 7.1 基本方針
 
-通常FIFO queueは使用しない。
-
 ```text
 latest wins
 ```
 
-を基本とする。
+通常FIFO queueは使用しない。
 
 ---
 
-## 7.2 MS2109 Triple Buffer
+## 7.2 Latest Pending JPEG
 
-3スロット：
+decode前はcompleted JPEGを1件のpending slotとして扱う。
 
 ```text
-FREE
-WRITING
-READY
-READING
+old pending
+    ↓ replace
+newest pending
 ```
 
-複数READYが存在する場合は最新sequenceのみ取得し、古いREADYを破棄する。
+decode遅延時に古いJPEGを順番に処理しない。
 
 ---
 
-## 7.3 MS2130 Decoded Latest-Frame Slots
+## 7.3 Latest Decoded Frame Slots
 
-TurboJPEG workerからrendererへdecoded frameを公開する。
+TurboJPEG workerからrendererへplanar decoded frameを公開する。
 
-公開時には、
+READY化前に、
 
 - sequence
-- width / height
-- Y/Cb/Cr stride
-- plane bytes
+- decoded Y/Cb/Cr
 - decode completion timestamp
 - B0→B2 timing
 
-を確定させた後にREADYとする。
+を確定する。
 
-Rendererは`waitForDecodedFrame()`で起床し、`copyLatestFrame()`で最新のcompleted frameのみ取得する。
+Rendererは`waitForDecodedFrame()`で起床し、`copyLatestFrame()`で最新completed frameのみ取得する。
+
+decode error frameはこの層へ到達しない。
 
 ---
 
 # 8. Event-Driven Renderer
 
-レンダリングは継続60/120 Hzループではなく、新しいcamera frameの到着をトリガーとする。
+レンダリングは固定60/120 Hzループではなく、新しいdecoded camera frameの到着をトリガーとする。
 
 ```text
-new frame READY
+new decoded frame READY
       ↓
 condition_variable
       ↓
@@ -536,7 +508,9 @@ renderer wake
       ↓
 latest frame取得
       ↓
-GPU upload
+PBO copy
+      ↓
+3-plane texture upload
       ↓
 preview + scopes UI compose
       ↓
@@ -550,20 +524,20 @@ sleep
 基本：
 
 ```text
-1 new source frame
+1 new decoded source frame
 =
 1 render
 =
 1 present
 ```
 
-同一映像を複数回presentしない。
+decode失敗時は新しいREADYが発生しないため、前回の正常表示を保持する。
 
 ---
 
 # 9. GPU Upload
 
-MS2109 / MS2130ともPersistent Mapped PBO ×2を使用するが、両経路は別PBO pairとする。
+共通MJPEG rendererではPersistent Mapped PBO ×2を使用する。
 
 ```text
 PBO available -> use
@@ -585,23 +559,7 @@ zero-timeoutとする。
 
 # 10. GPU Texture Representation
 
-## 10.1 MS2109
-
-```text
-Source : YUYV 720×480
-Texture: RGBA8 360×480
-
-R = Y0
-G = U
-B = Y1
-A = V
-```
-
-1 texel = 2 source pixels。
-
----
-
-## 10.2 MS2130
+共通planar MJPEG texture：
 
 ```text
 Y  : GL_R8 1280×720
@@ -613,27 +571,15 @@ Cr : GL_R8  640×720
 
 CPU側でinterleaveやRGBA conversionは行わない。
 
+旧packed YUYV / RGBA8 360×480 texture経路は現行baselineから削除済み。
+
 ---
 
 # 11. Color Range / Matrix
 
-## 11.1 MS2109
+HDMI sourceの色域 / transferと、UVC MJPEG decoded YCbCrの復元条件は分けて扱う。
 
-既存実測・運用条件ではBT.601 limited rangeを使用する。
-
-```text
-Y  = limited
-Cb = limited
-Cr = limited
-```
-
----
-
-## 11.2 MS2130
-
-HDMI sourceそのものの色域/transferと、MS2130がUVC MJPEGへ出力したdecoded YCbCrのmatrix/rangeは分けて扱う。
-
-実機range / color-bar診断結果を基準に、**現行decoded interfaceではBT.601 limited-rangeとして復元する**。
+MS2130-classでは実機range / color-bar診断結果を基準に、decoded interfaceをBT.601 limited-rangeとして復元している。
 
 ```text
 Y  = (Ycode  - 16)  / 219
@@ -644,40 +590,20 @@ Cr = (Crcode - 128) / 224
 これは、
 
 ```text
-MS2130 decoded JPEG YCbCr -> RGB
+decoded JPEG YCbCr -> RGB
 ```
 
 の復元条件であり、HDMI HDR source自体をBT.601色域と定義するものではない。
+
+MS2109-classも現行共通rendererを通るため同じdecoded YCbCr処理を使用するが、device / firmware差を含む厳密なmatrix/range特性は継続検証対象とする。
 
 ---
 
 # 12. HDR / PQ Architecture
 
-MS2130ではHDR / ST2084 PQ入力を実機確認済み。
+MS2109 / MS2130の共通planar MJPEG rendererでは、入力modeがPQとして既知・選択されている場合にPreviewのみHDR→SDR変換を行う。
 
-PQテストパターン代表値：
-
-```text
-100 nit     ≈ 51 %
-203 nit     ≈ 58 %
-1000 nit    ≈ 75 %
-4000 nit    ≈ 90 %
-10000 nit   = 100 %
-```
-
-Waveform上でも上記geometryが確認できている。
-
-ただしMS2130 UVC出力は8-bit MJPEGであるため、
-
-```text
-HDMI HDR source
-    ↓
-MS2130
-    ↓
-8-bit MJPEG
-```
-
-となり、HDMI側の10-bit精度そのものを保持する構成ではない。
+UVC側は8-bit MJPEGであるため、HDMI側の10-bit精度そのものを保持する構成ではない。
 
 ---
 
@@ -686,7 +612,7 @@ MS2130
 ScopeにはPQ EOTF / Tone Mappingを入れない。
 
 ```text
-MS2130 source-domain
+decoded YCbCr source-domain
       │
       ├─ Luma Waveform
       ├─ RGB Parade
@@ -694,14 +620,14 @@ MS2130 source-domain
       └─ Vectorscope
 ```
 
-特にWaveformではdecoded Y codeを0–255のまま保持する。
+Waveformではdecoded Y codeを0–255のまま保持する。
 
 ```text
 Y=16  -> bin 16
 Y=235 -> bin 235
 ```
 
-MS2130入力を再度16–235へsqueezeしない。
+PQ入力を再度16–235へsqueezeしない。
 
 これによりsuper-black / super-whiteおよびPQ code geometryを保持する。
 
@@ -712,7 +638,7 @@ MS2130入力を再度16–235へsqueezeしない。
 PreviewのみHDR→SDR表示変換を行う。
 
 ```text
-MS2130 YCbCr
+decoded YCbCr
       ↓
 BT.601 limited YCbCr → R'G'B'
       ↓
@@ -737,43 +663,29 @@ Preview processing
 Measurement processing
 ```
 
-Previewが白飛びしてもScope値は変更しない。
-
-Tone Mappingを変更してもWaveform geometryを変更しない。
+Preview側のTone Mappingを変更してもScope geometryを変更しない。
 
 ---
 
 ## 12.3 Tone Mapping
 
-現在のPreviewは203 nit付近をSDR reference whiteの基準として扱う。
+Previewは203 nit付近をSDR reference whiteの基準として扱う。
 
 ```text
 203 nit ≈ SDR white reference
 ```
 
-それ以上のHDR highlightは圧縮する。
-
-1000 nit / 4000 nitパッチではPreview側で強いhighlight / 白飛びが発生する一方、Waveformは75 % / 90 %付近を維持することを確認済み。
-
-SHARP 8Kリファレンスモニターとの目視比較では大きな差は確認されていない。
-
-現状の観察：
+代表的PQ code geometry：
 
 ```text
-Luminance / PQ behavior : 大きな差なし
-Tone Mapping            : 実用上近い
-Color                    : 若干Yellow方向が強く見える可能性
+100 nit     ≈ 51 %
+203 nit     ≈ 58 %
+1000 nit    ≈ 75 %
+4000 nit    ≈ 90 %
+10000 nit   = 100 %
 ```
 
-Yellow方向の微差は現時点で固定gain補正を入れず、原因を切り分ける。
-
-候補：
-
-- MS2130内部HDMI→MJPEG処理
-- decoded YCbCr matrix/rangeの微差
-- BT.2020→BT.709変換
-- gamut clipping / compression
-- tone-map時の色相保持
+高輝度highlightはPreview側で圧縮する一方、Scopeはsource-domain code geometryを維持する。
 
 ---
 
@@ -800,19 +712,14 @@ input mode is known / selected as PQ
 
 # 13. GPU Scope Architecture
 
-4スコープを1回のcombined Compute dispatchで処理する。
+4スコープをGPU Computeで処理する。
 
-MS2109：
-
-```text
-RGBA8 Packed YUYV 360×480
-```
-
-MS2130：
+入力：
 
 ```text
-Y / Cb / Cr planar textures
-1280×720 / 640×720 / 640×720
+Y  : 1280×720
+Cb :  640×720
+Cr :  640×720
 ```
 
 出力：
@@ -833,6 +740,8 @@ Back SSBO  -> Compute書き込み
 
 GPU fenceはzero-timeout pollし、完了したBackのみFrontへ昇格する。
 
+Scope computeがbusyの場合は今回の解析をskipし、前回完了結果を保持する。
+
 ---
 
 # 14. Luma Waveform
@@ -852,13 +761,7 @@ Y=0    -> 約 -7.3 IRE
 Y=255  -> 約109.1 IRE
 ```
 
-MS2109 720×480では1 frameあたり：
-
-```text
-720 × 480 = 345,600 samples
-```
-
-MS2130では1280 source pixelを720 waveform X座標へdown-mapして表示する。
+1280 source pixelを720 waveform X座標へdown-mapして表示する。
 
 HDR/PQ時もWaveformはsource code geometryを維持する。
 
@@ -867,8 +770,6 @@ HDR/PQ時もWaveformはsource code geometryを維持する。
 # 15. RGB Parade
 
 RGB Paradeはdecoded YCbCrからRGBへ変換した値をR/G/Bそれぞれ独立して集計する。
-
-MS2130では現行のBT.601 limited復元を使用する。
 
 ```text
 Parade plot : 224 × 161
@@ -894,7 +795,7 @@ HDR Preview用Tone Mapping後の値は使用しない。
 
 VectorscopeはRGB round-tripを行わず、source YCbCrのCb/Crを直接使用する。
 
-MS2109 / MS2130 limited-range基準：
+limited-range基準：
 
 ```text
 Cb = (code - 128) / 224
@@ -939,9 +840,7 @@ eglSwapBuffers()
     ↓
 Scope fence poll
     ↓
-Scope texture update / queue
-    ↓
-Compute dispatch
+Scope compute queue
     ↓
 glFenceSync()
     ↓
@@ -1008,7 +907,7 @@ Display
 - COMPOSITION_LATCH_TIME
 - DISPLAY_PRESENT_TIME
 
-を取得して実表示時刻を計測する。
+を取得して実表示時刻を計測できる。
 
 ---
 
@@ -1043,31 +942,23 @@ same AHB setBuffer transaction
 
 を行う。
 
-目的：
+目的はEGL window BufferQueueのdequeue / queue cycle回避。
 
-```text
-EGL window BufferQueue
-dequeue / queue cycle
-```
-
-の回避。
-
-対応しない端末では自動的にEGL / BufferQueueへfallbackする。
+対応しない端末ではEGL / BufferQueueへfallbackする。
 
 A202ZTではFront Buffer usageが利用できない。
-
-Teclast P30T / Unisoc T7250 / Android 16では本経路を評価対象とするが、**対応可否および改善量は実機検証前提**とする。
 
 ---
 
 # 21. レイテンシ計測
 
-## 21.1 MS2109
-
-既存基準点：
+## 21.1 共通MJPEG基準点
 
 ```text
-T0 = UVC complete frame READY
+B0 = UVC JPEG frame受信開始側
+B2 = TurboJPEG decode完了 / decoded frame publish
+
+T0 = decoded frame取得開始
 T1 = CPU → PBO copy完了
 T2 = texture upload発行完了
 T3 = draw commands完了
@@ -1076,25 +967,7 @@ T5 = eglSwapBuffers return
 PRESENT = EGL_DISPLAY_PRESENT_TIME_ANDROID
 ```
 
-A202ZT / MS2109旧ベースライン：
-
-```text
-T0 → T5       avg 約11.7 ms
-T0 → PRESENT  約50～58 ms
-```
-
----
-
-## 21.2 MS2130
-
-追加基準：
-
-```text
-B0 = MS2130 wire frame受信開始側
-B2 = TurboJPEG decode完了 / frame publish
-```
-
-最新代表実測：
+MS2130-classの既存安定実測例では、
 
 ```text
 B0 → B2        ≈ 18.5～21 ms
@@ -1102,33 +975,9 @@ B2 → PRESENT   ≈ 21.5～22.5 ms
 B0 → PRESENT   ≈ 40～43 ms
 ```
 
-代表値：
+を確認している。
 
-```text
-39.986 ms
-42.556 ms
-43.087 ms
-```
-
-平均約：
-
-```text
-41.9 ms
-```
-
-約60 fps換算：
-
-```text
-約2.5 frames
-```
-
-この時点のログは、
-
-```text
-path = EGL_SWAP
-```
-
-であり、Step15D Front Bufferの結果ではない。
+MS2109-class 720p60 MJPEGについてはhost依存のdecode errorが確認された環境があるため、安定hostでのbaselineを別途取得する。
 
 HDMI source内部生成遅延やcamera sensor exposureは含まない。
 
@@ -1152,52 +1001,118 @@ HDMI source内部生成遅延やcamera sensor exposureは含まない。
 
 - PBO busy時のframe skip
 - decode pending JPEGのlatest replacement
+- decode error frameのdrop
 - scope result更新skip
 - 古いREADY frame破棄
 
 ---
 
-# 23. Unisoc T7250移植チェックリスト
+# 23. Diagnostic / Logging
 
-Teclast P30Tでは以下を順に確認する。
+通常運用ではLogcatを必要最小限に抑える。
 
-## 23.1 Platform
+デフォルトで残すもの：
 
-- Android 16 / API level確認
+```text
+ISO / BULK transport statistics
+TurboJPEG statistics
+warning / error
+```
+
+代表的なMJPEG decoder統計：
+
+```text
+fps
+jpegBytes avg/min/max
+queueMs
+decodeCallMs
+decodeTotalMs
+B0toB2Ms
+decodeErr
+queueDrop
+frameSlotDrop
+totalDecoded
+```
+
+通常無効：
+
+- per-frame render latency
+- per-frame PRESENT timing
+- presentation JIT detail
+- scope queue periodic log
+- Colorbar diagnostic
+- Range diagnostic
+
+必要時のみdiagnostic flagで再有効化する。
+
+---
+
+# 24. Hardware / Signal Integrity診断方針
+
+MS2109-classでdecode errorや局所フリッカーが発生した場合、software decoderだけでなくhost hardware条件も切り分ける。
+
+確認項目：
+
+- Android端末変更
+- OTGアダプタ変更
+- USBケーブル変更
+- セルフパワーHub経由
+- VBUS電圧 / droop
+- GND品質
+- connector接触
+- USB PHY / signal integrity
+- SDR / HDR入力差
+- UVC ERR / malformed / ISO packet error / TurboJPEG decode error
+
+特に、
+
+```text
+isoErr = 0
+queueDrop = 0
+frameSlotDrop = 0
+decodeErr > 0
+```
+
+のようなケースでは、ホスト側で明示的なISO packet errorが検出されていなくても、capture device内部処理やhost電源条件を含めたhardware依存性を疑う。
+
+thermal要因は別途切り分け、端末変更で症状が消える場合はhost側条件を優先して評価する。
+
+---
+
+# 25. 移植チェックリスト
+
+## 25.1 Platform
+
+- Android API level確認
 - USB Host有効
 - UVC device permission取得
 - native FD受け渡し
-- NDK r28 build動作
+- NDK build動作
 - GLES version / extensions列挙
 - EGL extensions列挙
 
-## 23.2 USB
+## 25.2 USB
 
-MS2109：
-
-- Isochronous transfer
-- Alt setting 3
-- 3072-byte payload
-- 30 fps維持
-
-MS2130：
-
-- Bulk endpoint認識
+- UVC VS interface探索
+- endpoint type判定
+- ISO backend
+- BULK backend
 - 1280×720 MJPEG
-- 約60 fps維持
+- 約60 fps
 - inflight transfer安定性
-- drop / malformed / UVC error統計
+- UVC error / malformed / transfer error統計
 
-## 23.3 Decode
+## 25.3 Decode
 
 - TurboJPEG build / ABI
 - YUV422 planar decode
-- 60 fps時decodeCall
+- decodeCall
+- decodeErr
 - queueDrop
 - frameSlotDrop
-- thermal throttling後のdecode時間
+- long-run安定性
 
-## 23.4 GPU
+## 25.4 GPU
 
 - OpenGL ES 3.1以上
 - Compute Shader
@@ -1207,7 +1122,7 @@ MS2130：
 - Scope shader compile
 - shader予約語 / readonly SSBO driver差
 
-## 23.5 Presentation
+## 25.5 Presentation
 
 - `EGL_ANDROID_presentation_time`
 - `EGL_ANDROID_get_frame_timestamps`
@@ -1217,28 +1132,22 @@ MS2130：
 - SurfaceControl NDK symbols
 - Step15D activate/fallback判定
 
-## 23.6 Memory / Thermal
+## 25.6 Memory / Thermal / USB Host
 
-RAM 3 GBのため、巨大なframe historyやsoftware FIFOを追加しない。
-
-現行latest-frame構造はUnisoc機でも維持する。
-
-長時間60 fps運用で、
-
-- CPU温度
-- GPU温度
+- RAM使用量
+- CPU/GPU温度
 - decode time
 - dropped frame
 - PBO busy skip
 - render latency
-
-の変化を確認する。
+- VBUS / OTG / cable依存性
+- 端末間USB Host差
 
 ---
 
-# 24. 設計原則
+# 26. 設計原則
 
-## 24.1 最新フレーム優先
+## 26.1 最新フレーム優先
 
 ```text
 latest wins
@@ -1246,51 +1155,31 @@ latest wins
 
 古い映像を順番に表示しない。
 
----
-
-## 24.2 Blocking回避
+## 26.2 Blocking回避
 
 ```text
-busy
- -> wait
+busy -> skip
 ```
 
-ではなく、
+を優先する。
 
-```text
-busy
- -> skip
-```
-
-を選択する。
-
----
-
-## 24.3 FIFOを作らない
+## 26.3 FIFOを作らない
 
 映像フレームを複数段queueしない。
 
-MS2130 JPEG decode queueもlatest pending semanticsとする。
+JPEG decode queueもlatest pending semanticsとする。
 
----
-
-## 24.4 GPU内処理
+## 26.4 GPU内処理
 
 映像解析のためにGPU→CPU readbackを常用しない。
 
 CPU readbackは初期論理検証・diagnostic用途へ限定する。
 
----
-
-## 24.5 Preview優先
+## 26.5 Preview優先
 
 Scope処理がPreview presentationを待たせない。
 
----
-
-## 24.6 Measurement / Preview分離
-
-HDR対応では特に、
+## 26.6 Measurement / Preview分離
 
 ```text
 Source
@@ -1301,104 +1190,61 @@ Source
        └─ display-domain
 ```
 
-を厳守する。
-
 PQ EOTF、Tone Mapping、gamut mappingはPreview専用。
 
----
-
-## 24.7 実測優先
-
-性能改善は体感のみで判断しない。
-
-主要計測点：
+## 26.7 Transport / Decode分離
 
 ```text
+ISO / BULK transport
+       ↓
+common UVC MJPEG decoder
+       ↓
+common renderer / scope
+```
+
+device-specific transport差をdecode / rendererへ持ち込まない。
+
+## 26.8 実測優先
+
+性能改善・不具合解析は体感のみで判断しない。
+
+主要統計：
+
+```text
+UVC ERR / malformed / transfer error
+JPEG bytes
+decodeErr / queueDrop / frameSlotDrop
 B0 / B2
 T0 / T1 / T2 / T3 / T4 / T5
-LATCH
-PRESENT
-```
-
-Scopeでは、
-
-```text
-waveform_sum
-parade_sum
-histogram_sum
-vector_sum
-busySkip
-preDispatchPromote
-```
-
-等を用いて論理検証する。
-
----
-
-# 25. 現在の安定ベースライン
-
-## MS2109 Compatibility Path
-
-```text
-Input
-MS2109
-720×480 YUYV 30 fps
-
-USB
-libusb async isochronous
-
-Frame Management
-latest-frame triple buffer
-
-GPU Upload
-persistent mapped PBO ×2
-
-GPU Format
-RGBA8 360×480 packed YUYV
-
-Rendering
-OpenGL ES
-event-driven
-
-Scopes
-Waveform / RGB Parade / Histogram / Vectorscope
-
-Presentation
-EGL / BufferQueue
-eglPresentationTimeANDROID(now)
-
-Measured
-UVC READY → Display Present ≈50～58 ms
+LATCH / PRESENT
+scope busySkip
 ```
 
 ---
 
-## MS2130 Current Main Path
+# 27. 現在の安定ベースライン
 
 ```text
 Input
-MS2130
+MS2109 / MS2130-class
 1280×720 MJPEG ≈60 fps
 SDR / HDR(PQ)
 
 USB
-libusb async Bulk
-latest pending JPEG
+descriptor-driven transport selection
+ISO or BULK
+libusb async
 
 Decode
+common uvc_mjpeg_decoder
 TurboJPEG
 planar YCbCr 4:2:2 8-bit
-
-Frame Management
+latest pending JPEG
 latest decoded frame slots
 
 GPU Upload
 persistent mapped PBO ×2
 3-plane GL_R8
-
-Decoded Color Interpretation
-BT.601 limited-range
-(empirically selected at MS2130 decoded interface)
 
 HDR Measurement
 PQ code geometry preserved
@@ -1412,41 +1258,41 @@ PQ EOTF
 
 Rendering
 event-driven
-one source frame -> one present
+one decoded source frame -> one present
 
 Presentation
-EGL / BufferQueue current measured path
+EGL / BufferQueue
 Step15D Front Buffer available as Android 16 experiment
-
-Measured
-B0 → PRESENT ≈40～43 ms
 ```
+
+MS2109-classについては一部Android hostでhardware依存のMJPEG decode error / flickerを確認しており、安定hostでは再現しない。capture device / host / OTG /電源 / signal integrityの組み合わせを含めて評価する。
 
 ---
 
-# 26. 未確定・今後の検証項目
+# 28. 未確定・今後の検証項目
 
-- MS2130内部HDMI→MJPEG色変換の正確な仕様
+- MS2109 / MS2130内部HDMI→MJPEG色変換の正確な仕様
 - HDR10 Static MetadataのUVC側取得方法
 - SDR / PQ / HLG自動判定
-- MS2130 10-bit入力→8-bit MJPEG量子化特性
+- 10-bit HDMI入力→8-bit MJPEG量子化特性
 - chroma processing詳細
-- SHARP 8K比較で観察した微小なYellow方向差の原因
+- BT.601 / BT.709 / BT.2020 matrixのdevice別厳密特性
 - gamut compression方式
 - HDR Tone Mapping最終カーブ
+- Android host別VBUS / signal integrity差
+- MS2109-classで観測したhost依存decode errorの電源/SI切り分け
 - Unisoc T7250のGPU/EGL extension実機一覧
 - Unisoc T7250でのPersistent PBO性能
 - Unisoc T7250でのStep15D Front Buffer可否
-- Unisoc T7250でのB0→PRESENT実測
 - Android 16長時間60 fps動作時のthermal behavior
 
 ---
 
-# 27. Version
+# 29. Version
 
 ```text
 Document : Android UVC Field Monitor Architecture Specification
 Revision : Current / 2026-09-27
-Baseline : MS2109 compatibility + MS2130 HDR main path
-Targets  : A202ZT / Teclast P30T (Unisoc T7250)
+Baseline : Shared 720p60 MJPEG pipeline for MS2109 / MS2130
+Targets  : Android 13+ / A202ZT / Teclast P30T (Unisoc T7250)
 ```
