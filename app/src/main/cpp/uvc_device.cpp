@@ -2538,6 +2538,144 @@ static void logJpegSampling(
 }
 
 
+enum class Jpeg422ProbeResult {
+    NeedMoreData,
+    Is422,
+    Not422
+};
+
+
+static Jpeg422ProbeResult probeJpeg422Sampling(
+        const std::vector<unsigned char>& jpeg)
+{
+    if (jpeg.size() < 2) {
+        return Jpeg422ProbeResult::NeedMoreData;
+    }
+
+    if (jpeg[0] != 0xff || jpeg[1] != 0xd8) {
+        LOGE("MJPEG 4:2:2 check: JPEG SOI missing");
+        return Jpeg422ProbeResult::Not422;
+    }
+
+    size_t offset = 2;
+
+    while (offset < jpeg.size()) {
+        if (jpeg[offset] != 0xff) {
+            ++offset;
+            continue;
+        }
+
+        while (offset < jpeg.size() && jpeg[offset] == 0xff) {
+            ++offset;
+        }
+
+        if (offset >= jpeg.size()) {
+            return Jpeg422ProbeResult::NeedMoreData;
+        }
+
+        const uint8_t marker = jpeg[offset++];
+
+        if (marker == 0xd8) {
+            continue;
+        }
+
+        if (marker == 0xd9 || marker == 0xda) {
+            LOGE("MJPEG 4:2:2 check: reached EOI/SOS before SOF");
+            return Jpeg422ProbeResult::Not422;
+        }
+
+        if (marker == 0x01 ||
+            (marker >= 0xd0 && marker <= 0xd7)) {
+            continue;
+        }
+
+        if (offset + 2 > jpeg.size()) {
+            return Jpeg422ProbeResult::NeedMoreData;
+        }
+
+        const uint16_t segmentLength =
+                static_cast<uint16_t>(
+                        (static_cast<uint16_t>(jpeg[offset]) << 8) |
+                        jpeg[offset + 1]
+                );
+
+        if (segmentLength < 2) {
+            LOGE(
+                    "MJPEG 4:2:2 check: invalid marker 0xFF%02X length=%u",
+                    marker,
+                    segmentLength
+            );
+            return Jpeg422ProbeResult::Not422;
+        }
+
+        if (offset + segmentLength > jpeg.size()) {
+            return Jpeg422ProbeResult::NeedMoreData;
+        }
+
+        const bool isSof =
+                marker == 0xc0 || marker == 0xc1 ||
+                marker == 0xc2 || marker == 0xc3 ||
+                marker == 0xc5 || marker == 0xc6 ||
+                marker == 0xc7 || marker == 0xc9 ||
+                marker == 0xca || marker == 0xcb ||
+                marker == 0xcd || marker == 0xce ||
+                marker == 0xcf;
+
+        if (isSof) {
+            if (segmentLength < 11) {
+                LOGE("MJPEG 4:2:2 check: SOF segment too short");
+                return Jpeg422ProbeResult::Not422;
+            }
+
+            const size_t data = offset + 2;
+            const uint8_t components = jpeg[data + 5];
+
+            if (components < 3 ||
+                data + 6 + static_cast<size_t>(components) * 3 >
+                        offset + segmentLength) {
+
+                LOGE(
+                        "MJPEG 4:2:2 check: unsupported SOF components=%u",
+                        components
+                );
+                return Jpeg422ProbeResult::Not422;
+            }
+
+            const uint8_t ySampling = jpeg[data + 7];
+            const uint8_t cbSampling = jpeg[data + 10];
+            const uint8_t crSampling = jpeg[data + 13];
+
+            const bool is422 =
+                    ((ySampling >> 4) & 0x0f) == 2 &&
+                    (ySampling & 0x0f) == 1 &&
+                    ((cbSampling >> 4) & 0x0f) == 1 &&
+                    (cbSampling & 0x0f) == 1 &&
+                    ((crSampling >> 4) & 0x0f) == 1 &&
+                    (crSampling & 0x0f) == 1;
+
+            LOGI(
+                    "MJPEG JPEG sampling: Y=%ux%u Cb=%ux%u Cr=%ux%u -> %s",
+                    (ySampling >> 4) & 0x0f,
+                    ySampling & 0x0f,
+                    (cbSampling >> 4) & 0x0f,
+                    cbSampling & 0x0f,
+                    (crSampling >> 4) & 0x0f,
+                    crSampling & 0x0f,
+                    is422 ? "YCbCr 4:2:2 PASS" : "NOT 4:2:2 FAIL"
+            );
+
+            return is422
+                    ? Jpeg422ProbeResult::Is422
+                    : Jpeg422ProbeResult::Not422;
+        }
+
+        offset += segmentLength;
+    }
+
+    return Jpeg422ProbeResult::NeedMoreData;
+}
+
+
 // ------------------------------------------------------------
 // MS2130 Step 11.1 diagnostic:
 //   continuous asynchronous BULK reception for 1280x720 MJPEG60.
@@ -2631,6 +2769,16 @@ static Ms2130BulkStats gMs2130BulkStats;
 
 static uint32_t gMs2130BulkMaxFrame = 0;
 static bool gMs2130BulkHeaderLogged = false;
+
+// One-shot JPEG SOF sampling validation.  The transport is accepted only
+// when the first complete MJPEG frame reports conventional JPEG 4:2:2:
+//   Y  = 2x1
+//   Cb = 1x1
+//   Cr = 1x1
+// After validation succeeds, no further JPEG-header copy is performed.
+static std::atomic<bool> gBulkJpeg422Checked{false};
+static std::atomic<bool> gBulkJpeg422Ok{false};
+static std::vector<unsigned char> gBulkJpegHeaderProbe;
 
 
 static uint64_t steadyNowNs()
@@ -2949,6 +3097,10 @@ static void processMs2130BulkPayload(
             gMs2130BulkFrame.active = true;
             gMs2130BulkFrame.fid = fid;
             gMs2130BulkFrame.firstPayloadNs = callbackNs;
+
+            if (!gBulkJpeg422Checked.load(std::memory_order_acquire)) {
+                gBulkJpegHeaderProbe.clear();
+            }
         }
     }
 
@@ -2957,6 +3109,47 @@ static void processMs2130BulkPayload(
     }
 
     ++gMs2130BulkFrame.payloads;
+
+    if (!gBulkJpeg422Checked.load(std::memory_order_acquire) &&
+        payloadOffset < payloadBytes) {
+
+        static constexpr size_t JPEG_HEADER_PROBE_LIMIT = 64 * 1024;
+
+        const size_t available = payloadBytes - payloadOffset;
+        const size_t remaining =
+                JPEG_HEADER_PROBE_LIMIT > gBulkJpegHeaderProbe.size()
+                ? JPEG_HEADER_PROBE_LIMIT - gBulkJpegHeaderProbe.size()
+                : 0;
+
+        const size_t copyBytes = std::min(available, remaining);
+
+        if (copyBytes > 0) {
+            gBulkJpegHeaderProbe.insert(
+                    gBulkJpegHeaderProbe.end(),
+                    payload + payloadOffset,
+                    payload + payloadOffset + copyBytes
+            );
+        }
+
+        const Jpeg422ProbeResult sampling =
+                probeJpeg422Sampling(gBulkJpegHeaderProbe);
+
+        if (sampling != Jpeg422ProbeResult::NeedMoreData) {
+            const bool ok = sampling == Jpeg422ProbeResult::Is422;
+            gBulkJpeg422Ok.store(ok, std::memory_order_release);
+            gBulkJpeg422Checked.store(true, std::memory_order_release);
+            gBulkJpegHeaderProbe.clear();
+        }
+        else if (gBulkJpegHeaderProbe.size() >= JPEG_HEADER_PROBE_LIMIT) {
+            LOGE(
+                    "MJPEG 4:2:2 check: SOF not found in first %zu bytes",
+                    JPEG_HEADER_PROBE_LIMIT
+            );
+            gBulkJpeg422Ok.store(false, std::memory_order_release);
+            gBulkJpeg422Checked.store(true, std::memory_order_release);
+            gBulkJpegHeaderProbe.clear();
+        }
+    }
 
     for (size_t i = payloadOffset;
          i < payloadBytes;
@@ -3000,6 +3193,15 @@ static void processMs2130BulkPayload(
         ++gMs2130BulkStats.droppedFrames;
         resetMs2130BulkFrame();
         return;
+    }
+
+    if (!gBulkJpeg422Checked.load(std::memory_order_acquire)) {
+        LOGE(
+                "MJPEG 4:2:2 check: complete JPEG reached EOF without usable SOF sampling"
+        );
+        gBulkJpeg422Ok.store(false, std::memory_order_release);
+        gBulkJpeg422Checked.store(true, std::memory_order_release);
+        gBulkJpegHeaderProbe.clear();
     }
 
     const double wireFrameMs =
@@ -3297,6 +3499,10 @@ static void stopMs2130AsyncBulkDiagnostic()
     gMs2130BulkStats = {};
     gMs2130BulkMaxFrame = 0;
     gMs2130BulkHeaderLogged = false;
+
+    gBulkJpeg422Checked.store(false, std::memory_order_release);
+    gBulkJpeg422Ok.store(false, std::memory_order_release);
+    gBulkJpegHeaderProbe.clear();
 }
 
 
@@ -3346,6 +3552,12 @@ static bool startMs2130AsyncBulkDiagnostic()
 
     gMs2130BulkMaxFrame = maxFrame;
     gMs2130BulkHeaderLogged = false;
+
+    gBulkJpeg422Checked.store(false, std::memory_order_release);
+    gBulkJpeg422Ok.store(false, std::memory_order_release);
+    gBulkJpegHeaderProbe.clear();
+    gBulkJpegHeaderProbe.reserve(4096);
+
     resetMs2130BulkFrame();
     gMs2130BulkStats = {};
     gMs2130BulkStats.lastLogNs =
@@ -3443,7 +3655,7 @@ static bool startMs2130AsyncBulkDiagnostic()
     }
 
     LOGI(
-            "MS2130 BULK async START: endpoint=0x%02X "
+            "MJPEG BULK async START: endpoint=0x%02X "
             "transferBytes=%u transfers=%d queuedBytes=%u "
             "maxFrame=%u target=1280x720 MJPEG60",
             UVC_VIDEO_ENDPOINT,
@@ -3456,9 +3668,43 @@ static bool startMs2130AsyncBulkDiagnostic()
             maxFrame
     );
 
+    // Validate the actual JPEG coding, not only the UVC format descriptor.
+    // SOF is near the start of a JPEG, so one frame is normally sufficient.
+    static constexpr int JPEG_422_CHECK_TIMEOUT_MS = 1000;
+
+    for (int waitedMs = 0;
+         waitedMs < JPEG_422_CHECK_TIMEOUT_MS &&
+         !gBulkJpeg422Checked.load(std::memory_order_acquire);
+         ++waitedMs) {
+
+        std::this_thread::sleep_for(
+                std::chrono::milliseconds(1)
+        );
+    }
+
+    if (!gBulkJpeg422Checked.load(std::memory_order_acquire)) {
+        LOGE(
+                "MJPEG BULK start: timed out waiting for JPEG 4:2:2 SOF check"
+        );
+        stopMs2130AsyncBulkDiagnostic();
+        return false;
+    }
+
+    if (!gBulkJpeg422Ok.load(std::memory_order_acquire)) {
+        LOGE(
+                "MJPEG BULK start: JPEG sampling is not YCbCr 4:2:2"
+        );
+        stopMs2130AsyncBulkDiagnostic();
+        return false;
+    }
+
     LOGI(
-            "MS2130 BULK latency note: wireFrameMs=SOI callback->EOF callback; "
-            "frameIntervalMs=EOF->EOF. HDMI->MS2130 internal encode delay is not "
+            "MJPEG BULK start: JPEG YCbCr 4:2:2 verified"
+    );
+
+    LOGI(
+            "MJPEG BULK latency note: wireFrameMs=SOI callback->EOF callback; "
+            "frameIntervalMs=EOF->EOF. Capture-device internal encode delay is not "
             "observable in this host-only test."
     );
 
@@ -4273,9 +4519,15 @@ bool openFromAndroidFd(int fd)
     const bool isMs2130 =
             supportedDevice->productId == 0x2130;
 
+    // MS2109 and MS2130 now share the same UVC transport mode:
+    //   1280x720 MJPEG over EP 0x83 BULK, IF1 ALT0.
+    const bool useMjpegBulk =
+            supportedDevice->productId == 0x2109 ||
+            supportedDevice->productId == 0x2130;
+
     if (!inspectUvcConfiguration(
             device,
-            isMs2130)) {
+            useMjpegBulk)) {
 
         LOGE(
                 "%s UVC descriptor layout check failed",
@@ -4288,7 +4540,7 @@ bool openFromAndroidFd(int fd)
     }
 
     const bool modeDiscovered =
-            isMs2130
+            useMjpegBulk
             ? discoverMs2130Mjpeg720p60Mode(
                     device,
                     gSelectedUvcMode
@@ -4390,7 +4642,7 @@ bool openFromAndroidFd(int fd)
     // --------------------------------------------------------
 
     const bool probeCommitOk =
-            isMs2130
+            useMjpegBulk
             ? negotiateAndCommitMs2130MjpegBulk(
                     gSelectedUvcMode
             )
@@ -4410,16 +4662,18 @@ bool openFromAndroidFd(int fd)
         return false;
     }
 
-    if (isMs2130) {
+    if (useMjpegBulk) {
 
         LOGI(
-                "MS2130 Step 11.1: starting continuous async BULK MJPEG diagnostic"
+                "%s Step 11.1: starting 1280x720 MJPEG60 async BULK",
+                supportedDevice->name
         );
 
         if (!startMs2130AsyncBulkDiagnostic()) {
 
             LOGE(
-                    "MS2130 Step 11.1: async BULK diagnostic start failed"
+                    "%s Step 11.1: async BULK MJPEG start/4:2:2 check failed",
+                    supportedDevice->name
             );
 
             closeLocked();
@@ -4428,9 +4682,10 @@ bool openFromAndroidFd(int fd)
         }
 
         LOGI(
-                "MS2130 TEST RUNNING: 1280x720 MJPEG60 async BULK; "
+                "%s BULK MJPEG RUNNING: 1280x720 MJPEG60, JPEG 4:2:2 verified; "
                 "1-second throughput/fps/latency stats enabled; "
-                "JPEG decode timing enabled; render intentionally not started"
+                "JPEG decode timing enabled; render intentionally not started",
+                supportedDevice->name
         );
 
         return true;
