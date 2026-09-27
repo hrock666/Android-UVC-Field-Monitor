@@ -1645,8 +1645,68 @@ precision highp int;
 in vec2 vUv;
 
 uniform sampler2D uTexture;
+uniform int uPqToSdr;
 
 out vec4 outColor;
+
+// SMPTE ST 2084 (PQ) EOTF. Input is normalized PQ code value.
+// Output is absolute linear-light RGB in cd/m^2.
+vec3 pqEotfNits(vec3 pq)
+{
+    const float m1 = 2610.0 / 16384.0;
+    const float m2 = 2523.0 / 32.0;
+    const float c1 = 3424.0 / 4096.0;
+    const float c2 = 2413.0 / 128.0;
+    const float c3 = 2392.0 / 128.0;
+
+    pq = clamp(pq, 0.0, 1.0);
+    vec3 p = pow(pq, vec3(1.0 / m2));
+    vec3 num = max(p - vec3(c1), vec3(0.0));
+    vec3 den = max(vec3(c2) - vec3(c3) * p, vec3(1.0e-6));
+
+    return 10000.0 * pow(num / den, vec3(1.0 / m1));
+}
+
+// Preview-only HDR -> SDR mapping.
+// 203 nit reference white maps to SDR white; highlights are compressed above it.
+vec3 toneMap203NitToSdrLinear(vec3 rgbNits)
+{
+    const vec3 yCoeff2020 = vec3(0.2627, 0.6780, 0.0593);
+    const float referenceWhiteNits = 203.0;
+
+    rgbNits = max(rgbNits, vec3(0.0));
+    float yNits = max(dot(rgbNits, yCoeff2020), 0.0);
+
+    float ySdr;
+    if (yNits <= referenceWhiteNits) {
+        ySdr = yNits / referenceWhiteNits;
+    }
+    else {
+        float x = (yNits - referenceWhiteNits) / referenceWhiteNits;
+        ySdr = 1.0 + (x / (1.0 + x)) * 0.25;
+    }
+
+    float scale = (yNits > 1.0e-6) ? (ySdr / yNits) : 0.0;
+    return rgbNits * scale;
+}
+
+vec3 bt2020ToBt709Linear(vec3 c)
+{
+    return vec3(
+         1.6604910 * c.r - 0.5876411 * c.g - 0.0728499 * c.b,
+        -0.1245505 * c.r + 1.1328999 * c.g - 0.0083494 * c.b,
+        -0.0181508 * c.r - 0.1005789 * c.g + 1.1187297 * c.b
+    );
+}
+
+vec3 linearToSrgb(vec3 c)
+{
+    c = max(c, vec3(0.0));
+    vec3 lo = 12.92 * c;
+    vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    vec3 useHi = step(vec3(0.0031308), c);
+    return mix(lo, hi, useHi);
+}
 
 void main()
 {
@@ -1684,6 +1744,16 @@ void main()
     rgb.r = yy + 1.59602715 * v;
     rgb.g = yy - 0.39176160 * u - 0.81296805 * v;
     rgb.b = yy + 2.01723214 * u;
+    rgb = clamp(rgb, 0.0, 1.0);
+
+    if (uPqToSdr != 0) {
+        // Preserve the existing MS2109 YUYV -> RGB reconstruction above.
+        // Only the preview interprets recovered R'G'B' as PQ/BT.2020.
+        vec3 rgb2020Nits = pqEotfNits(rgb);
+        vec3 rgb2020SdrLinear = toneMap203NitToSdrLinear(rgb2020Nits);
+        vec3 rgb709Linear = bt2020ToBt709Linear(rgb2020SdrLinear);
+        rgb = linearToSrgb(clamp(rgb709Linear, 0.0, 1.0));
+    }
 
     outColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
 }
@@ -1925,7 +1995,7 @@ void main()
         glUniform1i(glGetUniformLocation(program, "uCr"), 2);
 
         // Preview-only switch. This does not alter ScopeGpu or source textures.
-        constexpr GLint MS2130_PQ_TO_SDR_PREVIEW = 1;
+        constexpr GLint MS2130_PQ_TO_SDR_PREVIEW = 0;
         glUniform1i(
                 glGetUniformLocation(program, "uPqToSdr"),
                 MS2130_PQ_TO_SDR_PREVIEW
@@ -4373,6 +4443,20 @@ static void renderLoop(ANativeWindow* window)
     glUniform1i(
             textureLocation,
             0
+    );
+
+    // Preview-only switch. ScopeGpu continues to read the original packed YUYV.
+    constexpr GLint MS2109_PQ_TO_SDR_PREVIEW = 1;
+    glUniform1i(
+            glGetUniformLocation(program, "uPqToSdr"),
+            MS2109_PQ_TO_SDR_PREVIEW
+    );
+
+    LOGI(
+            "MS2109 preview transfer: %s",
+            MS2109_PQ_TO_SDR_PREVIEW != 0
+            ? "PQ/ST2084 -> SDR/BT.709/sRGB; scopes unchanged"
+            : "native source code values"
     );
 
 
