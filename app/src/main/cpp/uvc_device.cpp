@@ -71,6 +71,20 @@ static constexpr uint32_t TARGET_YUYV_FRAME_BYTES =
 static constexpr int TARGET_STREAM_ALT_SETTING = 3;
 static constexpr uint32_t TARGET_STREAM_ALT_CAPACITY = 3072;
 
+enum class UvcTransportType {
+    Unsupported = 0,
+    Isochronous,
+    Bulk,
+};
+
+struct UvcTransportInfo {
+    UvcTransportType type = UvcTransportType::Unsupported;
+    uint8_t interfaceNumber = 0;
+    uint8_t endpointAddress = 0;
+    uint8_t altSetting = 0;
+    uint32_t capacityBytes = 0;
+};
+
 static constexpr unsigned int CONTROL_TIMEOUT_MS = 1000;
 
 // UVC request codes.
@@ -477,10 +491,12 @@ static bool chooseContinuous30FpsInterval(
 }
 
 
-static bool inspectUvcConfiguration(
+static bool detectUvcTransport(
         libusb_device* device,
-        bool bulkStreaming)
+        UvcTransportInfo& transport)
 {
+    transport = {};
+
     libusb_config_descriptor* config =
             nullptr;
 
@@ -511,10 +527,12 @@ static bool inspectUvcConfiguration(
     );
 
     bool foundVsInterface = false;
-    bool foundExpectedEndpoint = false;
-    bool foundAlt3Capacity = false;
     bool foundBulkEndpoint = false;
+    bool foundIsoEndpoint = false;
+
     uint16_t bulkMaxPacket = 0;
+    uint8_t bestIsoAlt = 0;
+    uint32_t bestIsoCapacity = 0;
 
     for (uint8_t i = 0;
          i < config->bNumInterfaces;
@@ -549,12 +567,14 @@ static bool inspectUvcConfiguration(
                     alt.bNumEndpoints
             );
 
-            if (alt.bInterfaceNumber ==
-                    UVC_VIDEO_STREAMING_INTERFACE &&
-                alt.bInterfaceClass ==
-                    LIBUSB_CLASS_VIDEO &&
-                alt.bInterfaceSubClass == 2) {
+            const bool isVideoStreaming =
+                    alt.bInterfaceNumber ==
+                        UVC_VIDEO_STREAMING_INTERFACE &&
+                    alt.bInterfaceClass ==
+                        LIBUSB_CLASS_VIDEO &&
+                    alt.bInterfaceSubClass == 2;
 
+            if (isVideoStreaming) {
                 foundVsInterface = true;
             }
 
@@ -589,39 +609,41 @@ static bool inspectUvcConfiguration(
                         ep.bInterval
                 );
 
-                if (alt.bInterfaceNumber ==
-                        UVC_VIDEO_STREAMING_INTERFACE &&
-                    ep.bEndpointAddress ==
-                        UVC_VIDEO_ENDPOINT &&
-                    isIn) {
+                if (!isVideoStreaming ||
+                    ep.bEndpointAddress !=
+                        UVC_VIDEO_ENDPOINT ||
+                    !isIn) {
 
-                    const uint8_t transferType =
-                            ep.bmAttributes &
-                            LIBUSB_TRANSFER_TYPE_MASK;
+                    continue;
+                }
 
-                    if (transferType ==
-                            LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
+                const uint8_t transferType =
+                        ep.bmAttributes &
+                        LIBUSB_TRANSFER_TYPE_MASK;
 
-                        foundExpectedEndpoint =
-                                true;
+                if (transferType ==
+                        LIBUSB_TRANSFER_TYPE_BULK &&
+                    alt.bAlternateSetting == 0) {
 
-                        if (alt.bAlternateSetting ==
-                                TARGET_STREAM_ALT_SETTING &&
-                            effectiveBytes ==
-                                static_cast<int>(
-                                        TARGET_STREAM_ALT_CAPACITY
-                                )) {
+                    foundBulkEndpoint = true;
+                    bulkMaxPacket = ep.wMaxPacketSize & 0x07ff;
+                }
+                else if (transferType ==
+                             LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
 
-                            foundAlt3Capacity =
-                                    true;
-                        }
-                    }
-                    else if (transferType ==
-                                 LIBUSB_TRANSFER_TYPE_BULK &&
-                             alt.bAlternateSetting == 0) {
+                    foundIsoEndpoint = true;
 
-                        foundBulkEndpoint = true;
-                        bulkMaxPacket = ep.wMaxPacketSize;
+                    if (effectiveBytes > 0 &&
+                        static_cast<uint32_t>(effectiveBytes) >
+                            bestIsoCapacity) {
+
+                        bestIsoAlt =
+                                alt.bAlternateSetting;
+
+                        bestIsoCapacity =
+                                static_cast<uint32_t>(
+                                        effectiveBytes
+                                );
                     }
                 }
             }
@@ -632,39 +654,108 @@ static bool inspectUvcConfiguration(
             config
     );
 
-    if (bulkStreaming) {
-
-        LOGI(
-                "MS2130 UVC descriptor check: "
-                "VS_IF=%s EP_0x83_BULK_ALT0=%s maxPacket=%u",
-                foundVsInterface ? "YES" : "NO",
-                foundBulkEndpoint ? "YES" : "NO",
-                bulkMaxPacket
-        );
-
-        return
-                foundVsInterface &&
-                foundBulkEndpoint;
-    }
-
     LOGI(
-            "MS2109 UVC descriptor check: "
-            "VS_IF=%s EP_0x83_ISO=%s ALT3_3072B=%s",
+            "UVC transport discovery: "
+            "VS_IF=%s EP_0x83_BULK_ALT0=%s "
+            "EP_0x83_ISO=%s bestIsoAlt=%u bestIsoCapacity=%u",
             foundVsInterface ? "YES" : "NO",
-            foundExpectedEndpoint
-            ? "YES"
-            : "NO",
-            foundAlt3Capacity
-            ? "YES"
-            : "NO"
+            foundBulkEndpoint ? "YES" : "NO",
+            foundIsoEndpoint ? "YES" : "NO",
+            bestIsoAlt,
+            bestIsoCapacity
     );
 
-    return
-            foundVsInterface &&
-            foundExpectedEndpoint &&
-            foundAlt3Capacity;
-}
+    if (!foundVsInterface) {
+        LOGE("UVC transport discovery failed: VideoStreaming IF1 not found");
+        return false;
+    }
 
+    // Transport is selected from the endpoint descriptor, not from VID/PID.
+    // Prefer BULK when EP 0x83 exists on VS ALT0. Otherwise use the
+    // highest-bandwidth ISO alternate setting advertised for EP 0x83.
+    if (foundBulkEndpoint) {
+
+        transport.type =
+                UvcTransportType::Bulk;
+
+        transport.interfaceNumber =
+                UVC_VIDEO_STREAMING_INTERFACE;
+
+        transport.endpointAddress =
+                UVC_VIDEO_ENDPOINT;
+
+        transport.altSetting = 0;
+        transport.capacityBytes = bulkMaxPacket;
+
+        LOGI(
+                "UVC transport selected: BULK "
+                "IF=%u ALT=%u EP=0x%02X maxPacket=%u",
+                transport.interfaceNumber,
+                transport.altSetting,
+                transport.endpointAddress,
+                transport.capacityBytes
+        );
+
+        return true;
+    }
+
+    if (foundIsoEndpoint) {
+
+        // The current ISO backend is validated for the classic MS2109
+        // 720x480 YUYV30 path: ALT3, 3072 bytes/microframe. Keep this
+        // constraint explicit instead of silently selecting an unsupported
+        // ISO layout.
+        if (bestIsoAlt != TARGET_STREAM_ALT_SETTING ||
+            bestIsoCapacity != TARGET_STREAM_ALT_CAPACITY) {
+
+            LOGE(
+                    "UVC ISO endpoint found but backend layout is unsupported: "
+                    "bestAlt=%u capacity=%u (expected alt=%d capacity=%u)",
+                    bestIsoAlt,
+                    bestIsoCapacity,
+                    TARGET_STREAM_ALT_SETTING,
+                    TARGET_STREAM_ALT_CAPACITY
+            );
+
+            return false;
+        }
+
+        transport.type =
+                UvcTransportType::Isochronous;
+
+        transport.interfaceNumber =
+                UVC_VIDEO_STREAMING_INTERFACE;
+
+        transport.endpointAddress =
+                UVC_VIDEO_ENDPOINT;
+
+        transport.altSetting =
+                bestIsoAlt;
+
+        transport.capacityBytes =
+                bestIsoCapacity;
+
+        LOGI(
+                "UVC transport selected: ISO "
+                "IF=%u ALT=%u EP=0x%02X capacity=%u B/microframe",
+                transport.interfaceNumber,
+                transport.altSetting,
+                transport.endpointAddress,
+                transport.capacityBytes
+        );
+
+        return true;
+    }
+
+    LOGE(
+            "UVC transport discovery failed: "
+            "EP 0x%02X not found as BULK or ISO on VS IF%d",
+            UVC_VIDEO_ENDPOINT,
+            UVC_VIDEO_STREAMING_INTERFACE
+    );
+
+    return false;
+}
 
 static bool discoverTargetUvcMode(
         libusb_device* device,
@@ -4519,15 +4610,11 @@ bool openFromAndroidFd(int fd)
     const bool isMs2130 =
             supportedDevice->productId == 0x2130;
 
-    // MS2109 and MS2130 now share the same UVC transport mode:
-    //   1280x720 MJPEG over EP 0x83 BULK, IF1 ALT0.
-    const bool useMjpegBulk =
-            supportedDevice->productId == 0x2109 ||
-            supportedDevice->productId == 0x2130;
+    UvcTransportInfo transport{};
 
-    if (!inspectUvcConfiguration(
+    if (!detectUvcTransport(
             device,
-            useMjpegBulk)) {
+            transport)) {
 
         LOGE(
                 "%s UVC descriptor layout check failed",
@@ -4538,6 +4625,14 @@ bool openFromAndroidFd(int fd)
 
         return false;
     }
+
+    const bool useMjpegBulk =
+            transport.type == UvcTransportType::Bulk;
+
+    LOGI(
+            "UVC backend dispatch: %s",
+            useMjpegBulk ? "BULK backend" : "ISO backend"
+    );
 
     const bool modeDiscovered =
             useMjpegBulk
@@ -4697,7 +4792,7 @@ bool openFromAndroidFd(int fd)
             libusb_set_interface_alt_setting(
                     gUsbHandle,
                     UVC_VIDEO_STREAMING_INTERFACE,
-                    TARGET_STREAM_ALT_SETTING
+                    transport.altSetting
             );
 
     if (r != LIBUSB_SUCCESS) {
@@ -4707,7 +4802,7 @@ bool openFromAndroidFd(int fd)
                 "set IF%d alt %d failed: "
                 "%d (%s)",
                 UVC_VIDEO_STREAMING_INTERFACE,
-                TARGET_STREAM_ALT_SETTING,
+                transport.altSetting,
                 r,
                 libusb_error_name(r)
         );
@@ -4718,21 +4813,22 @@ bool openFromAndroidFd(int fd)
     }
 
     gCurrentAltSetting =
-            TARGET_STREAM_ALT_SETTING;
+            transport.altSetting;
 
     LOGI(
             "Step 10: IF%d alt=%d selected "
             "(EP 0x%02X, %u B/microframe)",
             UVC_VIDEO_STREAMING_INTERFACE,
-            TARGET_STREAM_ALT_SETTING,
-            UVC_VIDEO_ENDPOINT,
-            TARGET_STREAM_ALT_CAPACITY
+            transport.altSetting,
+            transport.endpointAddress,
+            transport.capacityBytes
     );
 
     LOGI(
             "Step 10 complete: "
             "720x480 YUYV30 committed, "
-            "alt3 active"
+            "ISO alt=%u active",
+            transport.altSetting
     );
 
     // --------------------------------------------------------
@@ -4753,11 +4849,11 @@ bool openFromAndroidFd(int fd)
             gUsbHandle;
 
     streamConfig.endpoint =
-            UVC_VIDEO_ENDPOINT;
+            transport.endpointAddress;
 
     streamConfig.isoPacketBytes =
             static_cast<int>(
-                    TARGET_STREAM_ALT_CAPACITY
+                    transport.capacityBytes
             );
 
     streamConfig.expectedFrameBytes =
