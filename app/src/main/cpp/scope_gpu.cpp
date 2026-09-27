@@ -29,6 +29,10 @@ static constexpr size_t VECTOR_BYTES = VECTOR_ITEMS * sizeof(uint32_t);
 static constexpr size_t MAXIMA_ITEMS = 6;
 static constexpr size_t MAXIMA_BYTES = MAXIMA_ITEMS * sizeof(uint32_t);
 
+// Periodic scope queue telemetry is useful during GPU tuning but too noisy
+// for normal operation. Startup validation and final statistics remain.
+static constexpr bool ENABLE_SCOPE_STATS_LOG = false;
+
 GLuint compileShader(GLenum type, const char* source)
 {
     GLuint shader = glCreateShader(type);
@@ -571,7 +575,8 @@ void ScopeGpu::queueFromYuv422Textures(
     glFlush();
     ++dispatches_;
 
-    if (dispatches_ <= 5 || (dispatches_ % 300) == 0) {
+    if (ENABLE_SCOPE_STATS_LOG &&
+        (dispatches_ <= 5 || (dispatches_ % 300) == 0)) {
         LOGI(
                 "Step 16.0 planar MJPEG scope queued #%llu seq=%llu "
                 "source=YUV422_1280x720 busySkip=%llu preDispatchPromote=%llu",

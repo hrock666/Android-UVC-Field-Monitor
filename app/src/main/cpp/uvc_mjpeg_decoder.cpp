@@ -44,6 +44,10 @@ static constexpr size_t CR_OFFSET = Y_BYTES + C_BYTES;
 
 static constexpr int DECODED_FRAME_SLOT_COUNT = 3;
 
+// Color-bar/range diagnostics are development-only and consume CPU on
+// decoded frames. Keep them off during normal field-monitor operation.
+static constexpr bool ENABLE_PATTERN_DIAG = false;
+
 enum DecodedSlotState : int {
     SLOT_FREE = 0,
     SLOT_WRITING = 1,
@@ -1313,8 +1317,10 @@ static void workerLoop()
 
             // Low-rate color-bar diagnostic runs after B2 timestamp/publication
             // so it does not inflate the measured JPEG decode completion time.
-            runColorBarDiagnostic(slot.yuv, job.sequence);
-            runRangeDiagnostic(slot.yuv, job.sequence);
+            if (ENABLE_PATTERN_DIAG) {
+                runColorBarDiagnostic(slot.yuv, job.sequence);
+                runRangeDiagnostic(slot.yuv, job.sequence);
+            }
         }
         else if (writeSlot >= 0) {
             gDecodedSlots[writeSlot].state.store(SLOT_FREE, std::memory_order_release);

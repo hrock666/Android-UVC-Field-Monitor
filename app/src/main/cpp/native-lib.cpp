@@ -341,6 +341,10 @@ static constexpr size_t PLANAR_MJPEG_CR_OFFSET = PLANAR_MJPEG_Y_BYTES + PLANAR_M
 static constexpr size_t PLANAR_MJPEG_YUV422_FRAME_BYTES =
         PLANAR_MJPEG_Y_BYTES + PLANAR_MJPEG_C_BYTES + PLANAR_MJPEG_C_BYTES;
 
+// Normal operation keeps Logcat focused on transport/decode health.
+// Enable only when detailed render/presentation timing is needed.
+static constexpr bool ENABLE_VERBOSE_TIMING_LOG = false;
+
 // Step 13.2 result retained for Step 14.
 //
 // true:
@@ -2189,6 +2193,11 @@ static void logPresentationWindow(
         return;
     }
 
+    if (!ENABLE_VERBOSE_TIMING_LOG) {
+        window.count = 0;
+        return;
+    }
+
     std::vector<double> total;
     std::vector<double> afterSwap;
 
@@ -2883,8 +2892,9 @@ static void pollPresentationTimestamps(
         }
 
 
-        if (tracker.resolved <= 5 ||
-            (tracker.resolved % 30) == 0) {
+        if (ENABLE_VERBOSE_TIMING_LOG &&
+            (tracker.resolved <= 5 ||
+             (tracker.resolved % 30) == 0)) {
 
             if (sample.jitTimingValid) {
 
@@ -2940,7 +2950,8 @@ static void pollPresentationTimestamps(
         }
 
 
-        if (sample.planarMjpeg &&
+        if (ENABLE_VERBOSE_TIMING_LOG &&
+            sample.planarMjpeg &&
             (tracker.resolved <= 5 ||
              (tracker.resolved % 30) == 0)) {
 
@@ -4273,8 +4284,9 @@ static void renderLoop(ANativeWindow* window)
 
         ++liveUploads;
 
-        if (liveUploads <= 5 ||
-            (liveUploads % 300) == 0) {
+        if (ENABLE_VERBOSE_TIMING_LOG &&
+            (liveUploads <= 5 ||
+             (liveUploads % 300) == 0)) {
 
             LOGI(
                     "Step 14: live frame uploaded #%llu "
@@ -4645,8 +4657,9 @@ static void renderLoop(ANativeWindow* window)
                         planarMjpegFrameTiming.b0ToB2Ms +
                         b2ToB5Ms;
 
-                if (liveUploads <= 5 ||
-                    (liveUploads % 30) == 0) {
+                if (ENABLE_VERBOSE_TIMING_LOG &&
+                    (liveUploads <= 5 ||
+                     (liveUploads % 30) == 0)) {
 
                     LOGI(
                             "PLANAR_MJPEG render latency seq=%llu path=%s | "
@@ -4685,7 +4698,8 @@ static void renderLoop(ANativeWindow* window)
         }
 
 
-        if ((frame % 300) == 0) {
+        if (ENABLE_VERBOSE_TIMING_LOG &&
+            (frame % 300) == 0) {
 
             LOGI(
                     "Step 14 render stats: "
