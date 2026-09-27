@@ -3,8 +3,8 @@
 namespace uvc_device {
 
 // Wrap an Android UsbDeviceConnection file descriptor with libusb,
-// discover the MS2109 UVC mode, negotiate/commit 720x480 YUYV 30 fps,
-// and select the streaming alternate setting.
+// discover the required 1280x720 MJPEG 60 fps UVC mode, negotiate/commit it,
+// and select the streaming backend/alternate setting.
 //
 // The Android-owned fd remains owned by UsbDeviceConnection.
 // It must stay open until close() has returned.

@@ -20,16 +20,8 @@ public:
     // Zero-timeout fence poll. Never waits for the GPU.
     void poll(bool preDispatchPoll);
 
-    // Queue analysis of the already-filled persistent PBO after present.
-    // The same scope-only packed texture feeds all enabled scope accumulators.
-    // pboFence is replaced with a later fence covering the scope texture upload.
-    void queueFromPbo(
-            GLuint pboId,
-            GLsync& pboFence,
-            uint64_t sequence);
-
-    // MS2130 path: analyze the already-uploaded planar JPEG YCbCr 4:2:2
-    // textures directly. No extra PBO copy/upload is performed for scopes.
+    // Analyze the already-uploaded planar JPEG YCbCr 4:2:2 textures
+    // directly. No extra PBO copy/upload is performed for scopes.
     void queueFromYuv422Textures(
             GLuint yTexture,
             GLuint cbTexture,
@@ -61,13 +53,10 @@ private:
     };
 
     GLuint clearProgram_ = 0;
-    GLuint accumulateProgram_ = 0;
     GLuint yuv422AccumulateProgram_ = 0;
-    GLint packedLocation_ = -1;
     GLint yLocation_ = -1;
     GLint cbLocation_ = -1;
     GLint crLocation_ = -1;
-    GLuint scopeTexture_ = 0;
 
     Slot slots_[2];
     int front_ = 0;

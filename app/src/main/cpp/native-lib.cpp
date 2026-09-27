@@ -14,7 +14,7 @@
 
 #include "uvc_device.h"
 #include "uvc_stream.h"
-#include "ms2130_jpeg_decode_diag.h"
+#include "uvc_mjpeg_decoder.h"
 #include "field_monitor_layout.h"
 #include "scope_ui.h"
 #include "scope_gpu.h"
@@ -320,10 +320,6 @@ static std::thread gRenderThread;
 static std::atomic<bool> gRunning{false};
 static ANativeWindow* gWindow = nullptr;
 
-using field_monitor::FRAME_W;
-using field_monitor::FRAME_H;
-using field_monitor::PACKED_W;
-using field_monitor::YUYV_FRAME_BYTES;
 using field_monitor::UiCanvasViewport;
 using field_monitor::UiLayout;
 using field_monitor::UiLayoutMode;
@@ -333,17 +329,17 @@ using field_monitor::calculateUiCanvasViewport;
 using field_monitor::selectUiLayout;
 using field_monitor::uiLogicalRectToViewport;
 
-static constexpr int MS2130_FRAME_W = 1280;
-static constexpr int MS2130_FRAME_H = 720;
-static constexpr int MS2130_CHROMA_W = MS2130_FRAME_W / 2;
-static constexpr size_t MS2130_Y_BYTES =
-        static_cast<size_t>(MS2130_FRAME_W) * MS2130_FRAME_H;
-static constexpr size_t MS2130_C_BYTES =
-        static_cast<size_t>(MS2130_CHROMA_W) * MS2130_FRAME_H;
-static constexpr size_t MS2130_CB_OFFSET = MS2130_Y_BYTES;
-static constexpr size_t MS2130_CR_OFFSET = MS2130_Y_BYTES + MS2130_C_BYTES;
-static constexpr size_t MS2130_YUV422_FRAME_BYTES =
-        MS2130_Y_BYTES + MS2130_C_BYTES + MS2130_C_BYTES;
+static constexpr int PLANAR_MJPEG_FRAME_W = 1280;
+static constexpr int PLANAR_MJPEG_FRAME_H = 720;
+static constexpr int PLANAR_MJPEG_CHROMA_W = PLANAR_MJPEG_FRAME_W / 2;
+static constexpr size_t PLANAR_MJPEG_Y_BYTES =
+        static_cast<size_t>(PLANAR_MJPEG_FRAME_W) * PLANAR_MJPEG_FRAME_H;
+static constexpr size_t PLANAR_MJPEG_C_BYTES =
+        static_cast<size_t>(PLANAR_MJPEG_CHROMA_W) * PLANAR_MJPEG_FRAME_H;
+static constexpr size_t PLANAR_MJPEG_CB_OFFSET = PLANAR_MJPEG_Y_BYTES;
+static constexpr size_t PLANAR_MJPEG_CR_OFFSET = PLANAR_MJPEG_Y_BYTES + PLANAR_MJPEG_C_BYTES;
+static constexpr size_t PLANAR_MJPEG_YUV422_FRAME_BYTES =
+        PLANAR_MJPEG_Y_BYTES + PLANAR_MJPEG_C_BYTES + PLANAR_MJPEG_C_BYTES;
 
 // Step 13.2 result retained for Step 14.
 //
@@ -934,8 +930,8 @@ static void runStep15AFrontBufferCapabilityProbe(
     const FrontBufferProbeOutcome source =
             probeFrontBufferAllocationAndEgl(
                     display,
-                    FRAME_W,
-                    FRAME_H,
+                    PLANAR_MJPEG_FRAME_W,
+                    PLANAR_MJPEG_FRAME_H,
                     frontFlags,
                     true
             );
@@ -990,7 +986,7 @@ static void runStep15AFrontBufferCapabilityProbe(
 
         LOGI(
                 "Step 15A RESULT: SOURCE_READY - "
-                "720x480 FRONT_BUFFER AHB + EGLImage/FBO works; "
+                "1280x720 FRONT_BUFFER AHB + EGLImage/FBO works; "
                 "full Surface path is not fully supported"
         );
     }
@@ -1607,232 +1603,7 @@ static GLuint compileShader(
 }
 
 
-static GLuint createProgram()
-{
-    static const char* vertexSource = R"(#version 300 es
-
-out vec2 vUv;
-
-void main()
-{
-    vec2 positions[3] = vec2[](
-        vec2(-1.0, -1.0),
-        vec2( 3.0, -1.0),
-        vec2(-1.0,  3.0)
-    );
-
-    vec2 p = positions[gl_VertexID];
-
-    gl_Position = vec4(
-        p,
-        0.0,
-        1.0
-    );
-
-    vUv = vec2(
-        (p.x + 1.0) * 0.5,
-        1.0 - ((p.y + 1.0) * 0.5)
-    );
-}
-)";
-
-
-    static const char* fragmentSource = R"(#version 300 es
-
-precision highp float;
-precision highp int;
-
-in vec2 vUv;
-
-uniform sampler2D uTexture;
-uniform int uPqToSdr;
-
-out vec4 outColor;
-
-// SMPTE ST 2084 (PQ) EOTF. Input is normalized PQ code value.
-// Output is absolute linear-light RGB in cd/m^2.
-vec3 pqEotfNits(vec3 pq)
-{
-    const float m1 = 2610.0 / 16384.0;
-    const float m2 = 2523.0 / 32.0;
-    const float c1 = 3424.0 / 4096.0;
-    const float c2 = 2413.0 / 128.0;
-    const float c3 = 2392.0 / 128.0;
-
-    pq = clamp(pq, 0.0, 1.0);
-    vec3 p = pow(pq, vec3(1.0 / m2));
-    vec3 num = max(p - vec3(c1), vec3(0.0));
-    vec3 den = max(vec3(c2) - vec3(c3) * p, vec3(1.0e-6));
-
-    return 10000.0 * pow(num / den, vec3(1.0 / m1));
-}
-
-// Preview-only HDR -> SDR mapping.
-// 203 nit reference white maps to SDR white; highlights are compressed above it.
-vec3 toneMap203NitToSdrLinear(vec3 rgbNits)
-{
-    const vec3 yCoeff2020 = vec3(0.2627, 0.6780, 0.0593);
-    const float referenceWhiteNits = 203.0;
-
-    rgbNits = max(rgbNits, vec3(0.0));
-    float yNits = max(dot(rgbNits, yCoeff2020), 0.0);
-
-    float ySdr;
-    if (yNits <= referenceWhiteNits) {
-        ySdr = yNits / referenceWhiteNits;
-    }
-    else {
-        float x = (yNits - referenceWhiteNits) / referenceWhiteNits;
-        ySdr = 1.0 + (x / (1.0 + x)) * 0.25;
-    }
-
-    float scale = (yNits > 1.0e-6) ? (ySdr / yNits) : 0.0;
-    return rgbNits * scale;
-}
-
-vec3 bt2020ToBt709Linear(vec3 c)
-{
-    return vec3(
-         1.6604910 * c.r - 0.5876411 * c.g - 0.0728499 * c.b,
-        -0.1245505 * c.r + 1.1328999 * c.g - 0.0083494 * c.b,
-        -0.0181508 * c.r - 0.1005789 * c.g + 1.1187297 * c.b
-    );
-}
-
-vec3 linearToSrgb(vec3 c)
-{
-    c = max(c, vec3(0.0));
-    vec3 lo = 12.92 * c;
-    vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
-    vec3 useHi = step(vec3(0.0031308), c);
-    return mix(lo, hi, useHi);
-}
-
-void main()
-{
-    int sx = clamp(
-        int(floor(vUv.x * 720.0)),
-        0,
-        719
-    );
-
-    int sy = clamp(
-        int(floor(vUv.y * 480.0)),
-        0,
-        479
-    );
-
-    // One RGBA8 texel stores two YUYV pixels:
-    // R=Y0, G=U, B=Y1, A=V.
-    vec4 packed = texelFetch(
-        uTexture,
-        ivec2(sx >> 1, sy),
-        0
-    );
-
-    float y = ((sx & 1) == 0)
-            ? packed.r
-            : packed.b;
-
-    float u = packed.g - 0.5;
-    float v = packed.a - 0.5;
-
-    // BT.601 limited-range YUV -> RGB.
-    float yy = 1.16438356 * (y - 16.0 / 255.0);
-
-    vec3 rgb;
-    rgb.r = yy + 1.59602715 * v;
-    rgb.g = yy - 0.39176160 * u - 0.81296805 * v;
-    rgb.b = yy + 2.01723214 * u;
-    rgb = clamp(rgb, 0.0, 1.0);
-
-    if (uPqToSdr != 0) {
-        // Preserve the existing MS2109 YUYV -> RGB reconstruction above.
-        // Only the preview interprets recovered R'G'B' as PQ/BT.2020.
-        vec3 rgb2020Nits = pqEotfNits(rgb);
-        vec3 rgb2020SdrLinear = toneMap203NitToSdrLinear(rgb2020Nits);
-        vec3 rgb709Linear = bt2020ToBt709Linear(rgb2020SdrLinear);
-        rgb = linearToSrgb(clamp(rgb709Linear, 0.0, 1.0));
-    }
-
-    outColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
-}
-)";
-
-
-    GLuint vs =
-            compileShader(
-                    GL_VERTEX_SHADER,
-                    vertexSource
-            );
-
-    GLuint fs =
-            compileShader(
-                    GL_FRAGMENT_SHADER,
-                    fragmentSource
-            );
-
-
-    if (!vs || !fs) {
-        return 0;
-    }
-
-
-    GLuint program =
-            glCreateProgram();
-
-    glAttachShader(
-            program,
-            vs
-    );
-
-    glAttachShader(
-            program,
-            fs
-    );
-
-    glLinkProgram(program);
-
-
-    GLint ok = GL_FALSE;
-
-    glGetProgramiv(
-            program,
-            GL_LINK_STATUS,
-            &ok
-    );
-
-
-    if (!ok) {
-
-        char log[1024] = {};
-
-        glGetProgramInfoLog(
-                program,
-                sizeof(log),
-                nullptr,
-                log
-        );
-
-        LOGE(
-                "Program link error: %s",
-                log
-        );
-
-        glDeleteProgram(program);
-
-        program = 0;
-    }
-
-
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-
-    return program;
-}
-
-
-static GLuint createMs2130YuvProgram()
+static GLuint createPlanarMjpegYuvProgram()
 {
     static const char* vertexSource = R"(#version 300 es
 
@@ -1886,7 +1657,7 @@ vec3 pqEotfNits(vec3 pq)
 }
 
 // Preview-only HDR -> SDR mapping. Measurement/scopes stay on the original
-// MS2130 source-code path and never pass through this function.
+// planar-MJPEG source-code path and never pass through this function.
 // 203 nit reference white maps to SDR white; highlights are compressed above it.
 vec3 toneMap203NitToSdrLinear(vec3 rgbNits)
 {
@@ -1930,7 +1701,7 @@ vec3 linearToSrgb(vec3 c)
 
 void main()
 {
-    // MS2130 diagnostics measured the decoded JPEG planes as nominal
+    // Planar-MJPEG diagnostics measured the decoded JPEG planes as nominal
     // BT.601 limited-range codes: Y=16..235, Cb/Cr centered at 128 with
     // nominal excursion 16..240. Recover nonlinear R'G'B' before optional PQ.
     float y8 = texture(uY, vUv).r * 255.0;
@@ -1948,7 +1719,7 @@ void main()
     rgb = clamp(rgb, 0.0, 1.0);
 
     if (uPqToSdr != 0) {
-        // Preserve the existing MS2130 JPEG YCbCr -> RGB reconstruction above.
+        // Preserve the existing planar-MJPEG YCbCr -> RGB reconstruction above.
         // Only the preview interprets the recovered R'G'B' as PQ/BT.2020.
         vec3 rgb2020Nits = pqEotfNits(rgb);
         vec3 rgb2020SdrLinear = toneMap203NitToSdrLinear(rgb2020Nits);
@@ -1980,7 +1751,7 @@ void main()
     if (!ok) {
         char log[1024] = {};
         glGetProgramInfoLog(program, sizeof(log), nullptr, log);
-        LOGE("MS2130 YCbCr program link error: %s", log);
+        LOGE("Planar MJPEG YCbCr program link error: %s", log);
         glDeleteProgram(program);
         program = 0;
     }
@@ -1995,169 +1766,21 @@ void main()
         glUniform1i(glGetUniformLocation(program, "uCr"), 2);
 
         // Preview-only switch. This does not alter ScopeGpu or source textures.
-        constexpr GLint MS2130_PQ_TO_SDR_PREVIEW = 0;
+        constexpr GLint PLANAR_MJPEG_PQ_TO_SDR_PREVIEW = 1;
         glUniform1i(
                 glGetUniformLocation(program, "uPqToSdr"),
-                MS2130_PQ_TO_SDR_PREVIEW
+                PLANAR_MJPEG_PQ_TO_SDR_PREVIEW
         );
 
         LOGI(
-                "MS2130 preview transfer: %s",
-                MS2130_PQ_TO_SDR_PREVIEW != 0
-                ? "PQ/ST2084 -> SDR/sRGB; scopes unchanged"
+                "Planar MJPEG preview transfer: %s",
+                PLANAR_MJPEG_PQ_TO_SDR_PREVIEW != 0
+                ? "PQ/ST2084 -> SDR/BT.709/sRGB; scopes unchanged"
                 : "native source code values"
         );
     }
 
     return program;
-}
-
-struct Rgb8 {
-    int r;
-    int g;
-    int b;
-};
-
-
-static inline uint8_t clampByte(int v)
-{
-    if (v < 0)   return 0;
-    if (v > 255) return 255;
-    return static_cast<uint8_t>(v);
-}
-
-
-static inline void rgbToYuv601Limited(
-        const Rgb8& rgb,
-        uint8_t& y,
-        uint8_t& u,
-        uint8_t& v)
-{
-    const int yi =
-            ((66 * rgb.r +
-              129 * rgb.g +
-               25 * rgb.b +
-              128) >> 8) + 16;
-
-    const int ui =
-            ((-38 * rgb.r -
-               74 * rgb.g +
-              112 * rgb.b +
-              128) >> 8) + 128;
-
-    const int vi =
-            ((112 * rgb.r -
-               94 * rgb.g -
-               18 * rgb.b +
-              128) >> 8) + 128;
-
-    y = clampByte(yi);
-    u = clampByte(ui);
-    v = clampByte(vi);
-}
-
-
-static Rgb8 getTestPixel(
-        int x,
-        uint64_t frame)
-{
-    static constexpr Rgb8 colors[8] = {
-            {255, 255, 255},
-            {255, 255,   0},
-            {  0, 255, 255},
-            {  0, 255,   0},
-            {255,   0, 255},
-            {255,   0,   0},
-            {  0,   0, 255},
-            {  0,   0,   0}
-    };
-
-    const int bar =
-            (x * 8) / FRAME_W;
-
-    Rgb8 c = colors[bar];
-
-    const int marker =
-            static_cast<int>(
-                    frame % FRAME_W
-            );
-
-    if (x == marker ||
-        x == marker + 1) {
-        c = {255, 255, 255};
-    }
-
-    return c;
-}
-
-
-static void fillYuyvTestPattern(
-        uint8_t* dst,
-        uint64_t frame)
-{
-    for (int y = 0; y < FRAME_H; ++y) {
-
-        for (int pair = 0;
-             pair < PACKED_W;
-             ++pair) {
-
-            const int x0 = pair * 2;
-            const int x1 = x0 + 1;
-
-            const Rgb8 rgb0 =
-                    getTestPixel(x0, frame);
-
-            const Rgb8 rgb1 =
-                    getTestPixel(x1, frame);
-
-            uint8_t y0, u0, v0;
-            uint8_t y1, u1, v1;
-
-            rgbToYuv601Limited(
-                    rgb0,
-                    y0,
-                    u0,
-                    v0
-            );
-
-            rgbToYuv601Limited(
-                    rgb1,
-                    y1,
-                    u1,
-                    v1
-            );
-
-            const uint8_t u =
-                    static_cast<uint8_t>(
-                            (
-                                static_cast<int>(u0) +
-                                static_cast<int>(u1) +
-                                1
-                            ) / 2
-                    );
-
-            const uint8_t v =
-                    static_cast<uint8_t>(
-                            (
-                                static_cast<int>(v0) +
-                                static_cast<int>(v1) +
-                                1
-                            ) / 2
-                    );
-
-            const size_t offset =
-                    (
-                        static_cast<size_t>(y) *
-                        PACKED_W +
-                        pair
-                    ) * 4;
-
-            dst[offset + 0] = y0;
-            dst[offset + 1] = u;
-            dst[offset + 2] = y1;
-            dst[offset + 3] = v;
-        }
-    }
 }
 
 // ------------------------------------------------------------
@@ -2467,10 +2090,10 @@ struct PresentationSample {
     double t0ToPresentMs = 0.0;
     double t5ToPresentMs = 0.0;
 
-    // For MS2130, T0 is B2 (decoded frame publication).  preT0Ms stores
+    // For planar MJPEG, T0 is B2 (decoded frame publication).  preT0Ms stores
     // the already-measured B0->B2 duration so B0->PRESENT can be reported
     // without mixing CLOCK_MONOTONIC with the BULK steady-clock timestamps.
-    bool ms2130 = false;
+    bool planarMjpeg = false;
     double preT0Ms = 0.0;
     double b0ToPresentMs = 0.0;
 
@@ -2513,7 +2136,7 @@ struct PendingPresentation {
     uint64_t eglFrameId = 0;
     uint64_t sequence = 0;
 
-    bool ms2130 = false;
+    bool planarMjpeg = false;
     double preT0Ms = 0.0;
 
     uint64_t frameReadyMonotonicNs = 0;
@@ -2693,32 +2316,32 @@ static void logPresentationWindow(
     );
 
 
-    std::vector<double> ms2130B0ToPresent;
-    std::vector<double> ms2130B2ToPresent;
+    std::vector<double> planarMjpegB0ToPresent;
+    std::vector<double> planarMjpegB2ToPresent;
 
     for (size_t i = 0; i < window.count; ++i) {
         const PresentationSample& sample = window.samples[i];
-        if (!sample.ms2130) {
+        if (!sample.planarMjpeg) {
             continue;
         }
-        ms2130B0ToPresent.push_back(sample.b0ToPresentMs);
-        ms2130B2ToPresent.push_back(sample.t0ToPresentMs);
+        planarMjpegB0ToPresent.push_back(sample.b0ToPresentMs);
+        planarMjpegB2ToPresent.push_back(sample.t0ToPresentMs);
     }
 
-    if (!ms2130B0ToPresent.empty()) {
-        const double msN = static_cast<double>(ms2130B0ToPresent.size());
+    if (!planarMjpegB0ToPresent.empty()) {
+        const double msN = static_cast<double>(planarMjpegB0ToPresent.size());
         LOGI(
-                "MS2130 PRESENT summary n=%zu | "
+                "PLANAR_MJPEG PRESENT summary n=%zu | "
                 "B0->PRESENT avg=%.3f ms p50=%.3f p95=%.3f max=%.3f | "
                 "B2->PRESENT avg=%.3f p50=%.3f p95=%.3f",
-                ms2130B0ToPresent.size(),
-                std::accumulate(ms2130B0ToPresent.begin(), ms2130B0ToPresent.end(), 0.0) / msN,
-                percentile(ms2130B0ToPresent, 0.50),
-                percentile(ms2130B0ToPresent, 0.95),
-                percentile(ms2130B0ToPresent, 1.00),
-                std::accumulate(ms2130B2ToPresent.begin(), ms2130B2ToPresent.end(), 0.0) / msN,
-                percentile(ms2130B2ToPresent, 0.50),
-                percentile(ms2130B2ToPresent, 0.95)
+                planarMjpegB0ToPresent.size(),
+                std::accumulate(planarMjpegB0ToPresent.begin(), planarMjpegB0ToPresent.end(), 0.0) / msN,
+                percentile(planarMjpegB0ToPresent, 0.50),
+                percentile(planarMjpegB0ToPresent, 0.95),
+                percentile(planarMjpegB0ToPresent, 1.00),
+                std::accumulate(planarMjpegB2ToPresent.begin(), planarMjpegB2ToPresent.end(), 0.0) / msN,
+                percentile(planarMjpegB2ToPresent, 0.50),
+                percentile(planarMjpegB2ToPresent, 0.95)
         );
     }
 
@@ -2893,7 +2516,7 @@ static void queuePresentationFrame(
         uint64_t swapStartMonotonicNs,
         uint64_t swapReturnMonotonicNs,
         const CompositorTimingSnapshot& compositorTiming,
-        bool ms2130 = false,
+        bool planarMjpeg = false,
         double preT0Ms = 0.0)
 {
     if (!tracker.enabled ||
@@ -2936,7 +2559,7 @@ static void queuePresentationFrame(
     target->valid = true;
     target->eglFrameId = eglFrameId;
     target->sequence = sequence;
-    target->ms2130 = ms2130;
+    target->planarMjpeg = planarMjpeg;
     target->preT0Ms = preT0Ms;
     target->frameReadyMonotonicNs =
             frameReadyMonotonicNs;
@@ -3138,10 +2761,10 @@ static void pollPresentationTimestamps(
                         item.frameReadyMonotonicNs
                 );
 
-        sample.ms2130 = item.ms2130;
+        sample.planarMjpeg = item.planarMjpeg;
         sample.preT0Ms = item.preT0Ms;
         sample.b0ToPresentMs =
-                item.ms2130
+                item.planarMjpeg
                 ? item.preT0Ms + sample.t0ToPresentMs
                 : 0.0;
 
@@ -3317,12 +2940,12 @@ static void pollPresentationTimestamps(
         }
 
 
-        if (sample.ms2130 &&
+        if (sample.planarMjpeg &&
             (tracker.resolved <= 5 ||
              (tracker.resolved % 30) == 0)) {
 
             LOGI(
-                    "MS2130 PRESENT seq=%llu frameId=%llu | "
+                    "PLANAR_MJPEG PRESENT seq=%llu frameId=%llu | "
                     "B0->B2=%.3f ms B2->PRESENT=%.3f ms "
                     "B0->PRESENT=%.3f ms T5->PRESENT=%.3f ms",
                     static_cast<unsigned long long>(item.sequence),
@@ -4136,92 +3759,23 @@ static void renderLoop(ANativeWindow* window)
 
 
 // --------------------------------------------------------
-// Double persistent PBO
+// Double persistent PBO for decoded planar MJPEG YCbCr 4:2:2.
 // --------------------------------------------------------
 
-    PboSlot pbo[2];
-
-
     const GLbitfield storageFlags =
-
             GL_MAP_WRITE_BIT |
-
             GL_MAP_PERSISTENT_BIT_EXT |
-
             GL_MAP_COHERENT_BIT_EXT;
 
+    PboSlot planarMjpegPbo[2];
 
-    for (auto& slot : pbo) {
-
-        glGenBuffers(
-                1,
-                &slot.id
-        );
-
-
-        glBindBuffer(
-                GL_PIXEL_UNPACK_BUFFER,
-                slot.id
-        );
-
-
-        p_glBufferStorageEXT(
-                GL_PIXEL_UNPACK_BUFFER,
-                YUYV_FRAME_BYTES,
-                nullptr,
-                storageFlags
-        );
-
-
-        slot.mapped =
-                reinterpret_cast<uint8_t*>(
-                        glMapBufferRange(
-                                GL_PIXEL_UNPACK_BUFFER,
-                                0,
-                                YUYV_FRAME_BYTES,
-                                storageFlags
-                        )
-                );
-
-
-        if (slot.mapped == nullptr) {
-
-            LOGE(
-                    "Persistent PBO mapping failed"
-            );
-
-            gRunning = false;
-            break;
-        }
-
-
-        LOGI(
-                "Persistent YUYV PBO mapped: id=%u ptr=%p bytes=%zu",
-                slot.id,
-                slot.mapped,
-                YUYV_FRAME_BYTES
-        );
-    }
-
-
-    glBindBuffer(
-            GL_PIXEL_UNPACK_BUFFER,
-            0
-    );
-
-
-    // MS2130 decoded planar YCbCr 4:2:2 path: keep a separate persistent PBO pair so the
-    // existing MS2109 packed-YUYV upload path remains untouched.
-    PboSlot ms2130Pbo[2];
-
-    for (auto& slot : ms2130Pbo) {
-
+    for (auto& slot : planarMjpegPbo) {
         glGenBuffers(1, &slot.id);
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, slot.id);
 
         p_glBufferStorageEXT(
                 GL_PIXEL_UNPACK_BUFFER,
-                MS2130_YUV422_FRAME_BYTES,
+                PLANAR_MJPEG_YUV422_FRAME_BYTES,
                 nullptr,
                 storageFlags
         );
@@ -4231,125 +3785,34 @@ static void renderLoop(ANativeWindow* window)
                         glMapBufferRange(
                                 GL_PIXEL_UNPACK_BUFFER,
                                 0,
-                                MS2130_YUV422_FRAME_BYTES,
+                                PLANAR_MJPEG_YUV422_FRAME_BYTES,
                                 storageFlags
                         )
                 );
 
         if (slot.mapped == nullptr) {
             LOGE(
-                    "MS2130 persistent YUV422 PBO mapping failed"
+                    "Planar MJPEG persistent YUV422 PBO mapping failed"
             );
             gRunning = false;
             break;
         }
 
         LOGI(
-                "MS2130 persistent YUV422 PBO mapped: id=%u ptr=%p bytes=%zu",
+                "Planar MJPEG persistent YUV422 PBO mapped: "
+                "id=%u ptr=%p bytes=%zu",
                 slot.id,
                 slot.mapped,
-                MS2130_YUV422_FRAME_BYTES
+                PLANAR_MJPEG_YUV422_FRAME_BYTES
         );
     }
 
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
 
-    GLuint texture = 0;
-
-    glGenTextures(
-            1,
-            &texture
-    );
-
-    glBindTexture(
-            GL_TEXTURE_2D,
-            texture
-    );
-
-
-    glTexParameteri(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_MIN_FILTER,
-            GL_NEAREST
-    );
-
-    glTexParameteri(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_MAG_FILTER,
-            GL_NEAREST
-    );
-
-    glTexParameteri(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_WRAP_S,
-            GL_CLAMP_TO_EDGE
-    );
-
-    glTexParameteri(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_WRAP_T,
-            GL_CLAMP_TO_EDGE
-    );
-
-
-    glTexStorage2D(
-            GL_TEXTURE_2D,
-            1,
-            GL_RGBA8,
-            PACKED_W,
-            FRAME_H
-    );
-
-
-    // --------------------------------------------------------
-    // Initialize the packed YUYV texture to video black.
-    //
-    // R=Y0=16, G=U=128, B=Y1=16, A=V=128
-    // --------------------------------------------------------
-
-    for (size_t offset = 0;
-         offset < YUYV_FRAME_BYTES;
-         offset += 4) {
-
-        pbo[0].mapped[offset + 0] = 16;
-        pbo[0].mapped[offset + 1] = 128;
-        pbo[0].mapped[offset + 2] = 16;
-        pbo[0].mapped[offset + 3] = 128;
-    }
-
-    glBindBuffer(
-            GL_PIXEL_UNPACK_BUFFER,
-            pbo[0].id
-    );
-
-    glTexSubImage2D(
-            GL_TEXTURE_2D,
-            0,
-            0,
-            0,
-            PACKED_W,
-            FRAME_H,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            nullptr
-    );
-
-    pbo[0].fence =
-            glFenceSync(
-                    GL_SYNC_GPU_COMMANDS_COMPLETE,
-                    0
-            );
-
-    glBindBuffer(
-            GL_PIXEL_UNPACK_BUFFER,
-            0
-    );
-
-
-    GLuint ms2130YTexture = 0;
-    GLuint ms2130CbTexture = 0;
-    GLuint ms2130CrTexture = 0;
+    GLuint planarMjpegYTexture = 0;
+    GLuint planarMjpegCbTexture = 0;
+    GLuint planarMjpegCrTexture = 0;
 
     const auto createPlaneTexture = [](
             GLuint& outTexture,
@@ -4372,46 +3835,31 @@ static void renderLoop(ANativeWindow* window)
     };
 
     createPlaneTexture(
-            ms2130YTexture,
-            MS2130_FRAME_W,
-            MS2130_FRAME_H
+            planarMjpegYTexture,
+            PLANAR_MJPEG_FRAME_W,
+            PLANAR_MJPEG_FRAME_H
     );
 
     createPlaneTexture(
-            ms2130CbTexture,
-            MS2130_CHROMA_W,
-            MS2130_FRAME_H
+            planarMjpegCbTexture,
+            PLANAR_MJPEG_CHROMA_W,
+            PLANAR_MJPEG_FRAME_H
     );
 
     createPlaneTexture(
-            ms2130CrTexture,
-            MS2130_CHROMA_W,
-            MS2130_FRAME_H
+            planarMjpegCrTexture,
+            PLANAR_MJPEG_CHROMA_W,
+            PLANAR_MJPEG_FRAME_H
     );
 
 
-    GLuint program =
-            createProgram();
+    GLuint planarMjpegProgram =
+            createPlanarMjpegYuvProgram();
 
-    GLuint ms2130Program =
-            createMs2130YuvProgram();
-
-
-    if (!program) {
-
+    if (!planarMjpegProgram) {
         LOGE(
-                "Shader program creation failed"
+                "Planar MJPEG YCbCr shader program creation failed"
         );
-
-        gRunning = false;
-    }
-
-    if (!ms2130Program) {
-
-        LOGE(
-                "MS2130 YCbCr shader program creation failed"
-        );
-
         gRunning = false;
     }
 
@@ -4428,43 +3876,11 @@ static void renderLoop(ANativeWindow* window)
     );
 
 
-    glUseProgram(
-            program
-    );
-
-
-    GLint textureLocation =
-            glGetUniformLocation(
-                    program,
-                    "uTexture"
-            );
-
-
-    glUniform1i(
-            textureLocation,
-            0
-    );
-
-    // Preview-only switch. ScopeGpu continues to read the original packed YUYV.
-    constexpr GLint MS2109_PQ_TO_SDR_PREVIEW = 1;
-    glUniform1i(
-            glGetUniformLocation(program, "uPqToSdr"),
-            MS2109_PQ_TO_SDR_PREVIEW
-    );
-
-    LOGI(
-            "MS2109 preview transfer: %s",
-            MS2109_PQ_TO_SDR_PREVIEW != 0
-            ? "PQ/ST2084 -> SDR/BT.709/sRGB; scopes unchanged"
-            : "native source code values"
-    );
-
-
     // --------------------------------------------------------
     // Step 15.4 modules: CM4 UI + shared GPU scope backend.
     //
-    // native-lib.cpp owns orchestration only. One post-present packed-texture
-    // upload feeds Waveform + RGB Parade + Histogram + Vectorscope in ScopeGpu; drawing stays in ScopeUi.
+    // native-lib.cpp owns orchestration only. The already-uploaded planar
+    // Y/Cb/Cr textures feed Waveform + RGB Parade + Histogram + Vectorscope.
     // --------------------------------------------------------
 
     field_monitor::ScopeUi scopeUi;
@@ -4567,21 +3983,14 @@ static void renderLoop(ANativeWindow* window)
     // --------------------------------------------------------
 
     uint64_t frame = 0;
-    uint64_t latestUvcSequence = 0;
-    uint64_t lastWakeSequence = 0;
-    uint64_t latestMs2130Sequence = 0;
-    uint64_t lastMs2130WakeSequence = 0;
+    uint64_t latestPlanarMjpegSequence = 0;
+    uint64_t lastPlanarMjpegWakeSequence = 0;
     uint64_t liveUploads = 0;
     uint64_t wakeTimeouts = 0;
-    uint64_t pboBusySkips = 0;
-    uint64_t copyRaceSkips = 0;
-    uint64_t ms2130PboBusySkips = 0;
-    uint64_t ms2130CopyRaceSkips = 0;
+    uint64_t planarMjpegPboBusySkips = 0;
+    uint64_t planarMjpegCopyRaceSkips = 0;
 
-    LatencyWindow latencyWindow{};
-
-    int preferredPbo = 1;
-    int preferredMs2130Pbo = 1;
+    int preferredPlanarMjpegPbo = 1;
 
 
     LOGI(
@@ -4631,84 +4040,74 @@ static void renderLoop(ANativeWindow* window)
         scopeGpu.poll(false);
 
 
-        const bool useMs2130 =
-                ms2130_jpeg_decode_diag::isRunning();
-
-        uint64_t readySequence =
-                useMs2130
-                ? lastMs2130WakeSequence
-                : lastWakeSequence;
-
-
-        const bool frameReady =
-                useMs2130
-                ? ms2130_jpeg_decode_diag::waitForDecodedFrame(
-                        lastMs2130WakeSequence,
-                        readySequence,
-                        100
-                )
-                : uvc_stream::waitForNewFrame(
-                        lastWakeSequence,
-                        readySequence,
-                        100
-                );
-
-
-        if (!gRunning.load(
-                std::memory_order_acquire)) {
-
-            break;
-        }
-
-
-        if (!frameReady) {
-
+        if (!uvc_mjpeg_decoder::isRunning()) {
             ++wakeTimeouts;
+            latestPlanarMjpegSequence = 0;
+            lastPlanarMjpegWakeSequence = 0;
 
-            if (
-                wakeTimeouts <= 5 ||
-                (wakeTimeouts % 20u) == 0u
-            ) {
+            if (wakeTimeouts <= 5 ||
+                (wakeTimeouts % 20u) == 0u) {
+
                 LOGW(
-                        "Step 15.7.1: waiting for frame "
-                        "timeouts=%llu source=%s uvcRunning=%s ms2130Running=%s "
-                        "lastUvcSeq=%llu lastMs2130Seq=%llu",
+                        "Step 15.7.1: waiting for planar MJPEG decoder "
+                        "timeouts=%llu isoRunning=%s",
                         static_cast<unsigned long long>(wakeTimeouts),
-                        useMs2130 ? "MS2130_YUV422" : "MS2109_YUYV",
-                        uvc_stream::isRunning() ? "YES" : "NO",
-                        ms2130_jpeg_decode_diag::isRunning() ? "YES" : "NO",
-                        static_cast<unsigned long long>(lastWakeSequence),
-                        static_cast<unsigned long long>(lastMs2130WakeSequence)
+                        uvc_stream::isRunning() ? "YES" : "NO"
                 );
             }
 
-            if (!uvc_stream::isRunning() &&
-                !ms2130_jpeg_decode_diag::isRunning()) {
+            std::this_thread::sleep_for(
+                    std::chrono::milliseconds(10)
+            );
+            continue;
+        }
 
-                latestUvcSequence = 0;
-                lastWakeSequence = 0;
-                latestMs2130Sequence = 0;
-                lastMs2130WakeSequence = 0;
+        uint64_t readySequence =
+                lastPlanarMjpegWakeSequence;
 
-                std::this_thread::sleep_for(
-                        std::chrono::milliseconds(10)
+        const bool frameReady =
+                uvc_mjpeg_decoder::waitForDecodedFrame(
+                        lastPlanarMjpegWakeSequence,
+                        readySequence,
+                        100
                 );
+
+        if (!gRunning.load(
+                std::memory_order_acquire)) {
+            break;
+        }
+
+        if (!frameReady) {
+            ++wakeTimeouts;
+
+            if (wakeTimeouts <= 5 ||
+                (wakeTimeouts % 20u) == 0u) {
+
+                LOGW(
+                        "Step 15.7.1: waiting for frame "
+                        "timeouts=%llu source=PLANAR_MJPEG "
+                        "isoRunning=%s decoderRunning=%s "
+                        "lastPlanarMjpegSeq=%llu",
+                        static_cast<unsigned long long>(wakeTimeouts),
+                        uvc_stream::isRunning() ? "YES" : "NO",
+                        uvc_mjpeg_decoder::isRunning() ? "YES" : "NO",
+                        static_cast<unsigned long long>(
+                                lastPlanarMjpegWakeSequence
+                        )
+                );
+            }
+
+            if (!uvc_mjpeg_decoder::isRunning()) {
+                latestPlanarMjpegSequence = 0;
+                lastPlanarMjpegWakeSequence = 0;
             }
 
             continue;
         }
 
+        lastPlanarMjpegWakeSequence = readySequence;
 
-        if (useMs2130) {
-            lastMs2130WakeSequence = readySequence;
-        }
-        else {
-            lastWakeSequence = readySequence;
-        }
-
-
-        uvc_stream::FrameTiming frameTiming{};
-        ms2130_jpeg_decode_diag::DecodedFrameTiming ms2130FrameTiming{};
+        uvc_mjpeg_decoder::DecodedFrameTiming planarMjpegFrameTiming{};
 
         CompositorTimingSnapshot compositorTiming{};
 
@@ -4735,118 +4134,75 @@ static void renderLoop(ANativeWindow* window)
 
 
         // ----------------------------------------------------
-        // Acquire one persistent mapped PBO without waiting.
-        // MS2109 and MS2130 intentionally keep separate PBO pairs because
-        // their frame formats/sizes are unrelated.
+        // Acquire one persistent mapped planar-MJPEG PBO without waiting.
         // ----------------------------------------------------
 
-        PboSlot* activePbo = nullptr;
-        int pboIndex = -1;
-
-        if (useMs2130) {
-            pboIndex =
-                    findAvailablePbo(
-                            ms2130Pbo,
-                            preferredMs2130Pbo
-                    );
-
-            if (pboIndex < 0) {
-                ++ms2130PboBusySkips;
-                continue;
-            }
-
-            activePbo = &ms2130Pbo[pboIndex];
-        }
-        else {
-            pboIndex =
-                    findAvailablePbo(
-                            pbo,
-                            preferredPbo
-                    );
-
-            if (pboIndex < 0) {
-                ++pboBusySkips;
-                continue;
-            }
-
-            activePbo = &pbo[pboIndex];
-        }
-
-
-        PboSlot& slot = *activePbo;
-
-
-        // ----------------------------------------------------
-        // Consume newest completed frame.
-        // ----------------------------------------------------
-
-        if (useMs2130) {
-            if (!ms2130_jpeg_decode_diag::copyLatestFrame(
-                    slot.mapped,
-                    MS2130_YUV422_FRAME_BYTES,
-                    latestMs2130Sequence,
-                    ms2130FrameTiming)) {
-
-                ++ms2130CopyRaceSkips;
-                continue;
-            }
-
-            lastMs2130WakeSequence =
-                    std::max(
-                            lastMs2130WakeSequence,
-                            latestMs2130Sequence
-                    );
-
-            if (ms2130FrameTiming.width != MS2130_FRAME_W ||
-                ms2130FrameTiming.height != MS2130_FRAME_H ||
-                ms2130FrameTiming.yStride !=
-                    static_cast<size_t>(MS2130_FRAME_W) ||
-                ms2130FrameTiming.cbStride !=
-                    static_cast<size_t>(MS2130_CHROMA_W) ||
-                ms2130FrameTiming.crStride !=
-                    static_cast<size_t>(MS2130_CHROMA_W) ||
-                ms2130FrameTiming.yBytes != MS2130_Y_BYTES ||
-                ms2130FrameTiming.cbBytes != MS2130_C_BYTES ||
-                ms2130FrameTiming.crBytes != MS2130_C_BYTES ||
-                ms2130FrameTiming.frameBytes != MS2130_YUV422_FRAME_BYTES) {
-
-                LOGE(
-                        "MS2130 renderer: unexpected planar geometry "
-                        "%dx%d strides=%zu/%zu/%zu bytes=%zu/%zu/%zu total=%zu",
-                        ms2130FrameTiming.width,
-                        ms2130FrameTiming.height,
-                        ms2130FrameTiming.yStride,
-                        ms2130FrameTiming.cbStride,
-                        ms2130FrameTiming.crStride,
-                        ms2130FrameTiming.yBytes,
-                        ms2130FrameTiming.cbBytes,
-                        ms2130FrameTiming.crBytes,
-                        ms2130FrameTiming.frameBytes
+        const int pboIndex =
+                findAvailablePbo(
+                        planarMjpegPbo,
+                        preferredPlanarMjpegPbo
                 );
-                continue;
-            }
+
+        if (pboIndex < 0) {
+            ++planarMjpegPboBusySkips;
+            continue;
         }
-        else {
-            if (!uvc_stream::copyLatestFrame(
-                    slot.mapped,
-                    YUYV_FRAME_BYTES,
-                    latestUvcSequence,
-                    frameTiming)) {
 
-                ++copyRaceSkips;
-                continue;
-            }
+        PboSlot& slot = planarMjpegPbo[pboIndex];
 
-            lastWakeSequence =
-                    std::max(
-                            lastWakeSequence,
-                            latestUvcSequence
-                    );
+
+        // ----------------------------------------------------
+        // Consume newest decoded planar frame.
+        // ----------------------------------------------------
+
+        if (!uvc_mjpeg_decoder::copyLatestFrame(
+                slot.mapped,
+                PLANAR_MJPEG_YUV422_FRAME_BYTES,
+                latestPlanarMjpegSequence,
+                planarMjpegFrameTiming)) {
+
+            ++planarMjpegCopyRaceSkips;
+            continue;
+        }
+
+        lastPlanarMjpegWakeSequence =
+                std::max(
+                        lastPlanarMjpegWakeSequence,
+                        latestPlanarMjpegSequence
+                );
+
+        if (planarMjpegFrameTiming.width != PLANAR_MJPEG_FRAME_W ||
+            planarMjpegFrameTiming.height != PLANAR_MJPEG_FRAME_H ||
+            planarMjpegFrameTiming.yStride !=
+                static_cast<size_t>(PLANAR_MJPEG_FRAME_W) ||
+            planarMjpegFrameTiming.cbStride !=
+                static_cast<size_t>(PLANAR_MJPEG_CHROMA_W) ||
+            planarMjpegFrameTiming.crStride !=
+                static_cast<size_t>(PLANAR_MJPEG_CHROMA_W) ||
+            planarMjpegFrameTiming.yBytes != PLANAR_MJPEG_Y_BYTES ||
+            planarMjpegFrameTiming.cbBytes != PLANAR_MJPEG_C_BYTES ||
+            planarMjpegFrameTiming.crBytes != PLANAR_MJPEG_C_BYTES ||
+            planarMjpegFrameTiming.frameBytes != PLANAR_MJPEG_YUV422_FRAME_BYTES) {
+
+            LOGE(
+                    "Planar MJPEG renderer: unexpected planar geometry "
+                    "%dx%d strides=%zu/%zu/%zu bytes=%zu/%zu/%zu total=%zu",
+                    planarMjpegFrameTiming.width,
+                    planarMjpegFrameTiming.height,
+                    planarMjpegFrameTiming.yStride,
+                    planarMjpegFrameTiming.cbStride,
+                    planarMjpegFrameTiming.crStride,
+                    planarMjpegFrameTiming.yBytes,
+                    planarMjpegFrameTiming.cbBytes,
+                    planarMjpegFrameTiming.crBytes,
+                    planarMjpegFrameTiming.frameBytes
+            );
+            continue;
         }
 
 
         // ----------------------------------------------------
-        // Persistent PBO -> source texture.
+        // Persistent PBO -> planar source textures.
         // ----------------------------------------------------
 
         glBindBuffer(
@@ -4854,72 +4210,55 @@ static void renderLoop(ANativeWindow* window)
                 slot.id
         );
 
-        if (useMs2130) {
-            // One contiguous PBO contains all three planes.  With a PBO bound,
-            // glTexSubImage2D() interprets the last argument as a byte offset.
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        // One contiguous PBO contains all three planes. With a PBO bound,
+        // glTexSubImage2D() interprets the last argument as a byte offset.
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, ms2130YTexture);
-            glTexSubImage2D(
-                    GL_TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    MS2130_FRAME_W,
-                    MS2130_FRAME_H,
-                    GL_RED,
-                    GL_UNSIGNED_BYTE,
-                    reinterpret_cast<const void*>(0)
-            );
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, planarMjpegYTexture);
+        glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                PLANAR_MJPEG_FRAME_W,
+                PLANAR_MJPEG_FRAME_H,
+                GL_RED,
+                GL_UNSIGNED_BYTE,
+                reinterpret_cast<const void*>(0)
+        );
 
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, ms2130CbTexture);
-            glTexSubImage2D(
-                    GL_TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    MS2130_CHROMA_W,
-                    MS2130_FRAME_H,
-                    GL_RED,
-                    GL_UNSIGNED_BYTE,
-                    reinterpret_cast<const void*>(MS2130_CB_OFFSET)
-            );
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, planarMjpegCbTexture);
+        glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                PLANAR_MJPEG_CHROMA_W,
+                PLANAR_MJPEG_FRAME_H,
+                GL_RED,
+                GL_UNSIGNED_BYTE,
+                reinterpret_cast<const void*>(PLANAR_MJPEG_CB_OFFSET)
+        );
 
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, ms2130CrTexture);
-            glTexSubImage2D(
-                    GL_TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    MS2130_CHROMA_W,
-                    MS2130_FRAME_H,
-                    GL_RED,
-                    GL_UNSIGNED_BYTE,
-                    reinterpret_cast<const void*>(MS2130_CR_OFFSET)
-            );
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, planarMjpegCrTexture);
+        glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                PLANAR_MJPEG_CHROMA_W,
+                PLANAR_MJPEG_FRAME_H,
+                GL_RED,
+                GL_UNSIGNED_BYTE,
+                reinterpret_cast<const void*>(PLANAR_MJPEG_CR_OFFSET)
+        );
 
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        }
-        else {
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, texture);
-            glTexSubImage2D(
-                    GL_TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    PACKED_W,
-                    FRAME_H,
-                    GL_RGBA,
-                    GL_UNSIGNED_BYTE,
-                    nullptr
-            );
-        }
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 
-        // B3 for MS2130 / T2 for MS2109: texture upload command issued.
+        // B3: planar texture upload commands issued.
         t2TextureUploadDoneNs = nowMonotonicRawNs();
 
         slot.fence =
@@ -4930,12 +4269,7 @@ static void renderLoop(ANativeWindow* window)
 
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-        if (useMs2130) {
-            preferredMs2130Pbo = pboIndex ^ 1;
-        }
-        else {
-            preferredPbo = pboIndex ^ 1;
-        }
+        preferredPlanarMjpegPbo = pboIndex ^ 1;
 
         ++liveUploads;
 
@@ -4943,14 +4277,10 @@ static void renderLoop(ANativeWindow* window)
             (liveUploads % 300) == 0) {
 
             LOGI(
-                    "Step 14: live frame uploaded #%llu source=%s seq=%llu PBO=%d",
+                    "Step 14: live frame uploaded #%llu "
+                    "source=PLANAR_MJPEG seq=%llu PBO=%d",
                     static_cast<unsigned long long>(liveUploads),
-                    useMs2130 ? "MS2130_YUV422" : "MS2109_YUYV",
-                    static_cast<unsigned long long>(
-                            useMs2130
-                            ? latestMs2130Sequence
-                            : latestUvcSequence
-                    ),
+                    static_cast<unsigned long long>(latestPlanarMjpegSequence),
                     pboIndex
             );
         }
@@ -5020,20 +4350,13 @@ static void renderLoop(ANativeWindow* window)
                 GL_COLOR_BUFFER_BIT
         );
 
-        if (useMs2130) {
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, ms2130YTexture);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, ms2130CbTexture);
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, ms2130CrTexture);
-            glUseProgram(ms2130Program);
-        }
-        else {
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, texture);
-            glUseProgram(program);
-        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, planarMjpegYTexture);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, planarMjpegCbTexture);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, planarMjpegCrTexture);
+        glUseProgram(planarMjpegProgram);
 
         glBindVertexArray(
                 vao
@@ -5205,9 +4528,7 @@ static void renderLoop(ANativeWindow* window)
                         "Step 15D FRONT submit seq=%llu "
                         "draw->transaction=%.3f ms",
                         static_cast<unsigned long long>(
-                                useMs2130
-                                ? ms2130FrameTiming.sequence
-                                : frameTiming.sequence
+                                planarMjpegFrameTiming.sequence
                         ),
                         nsToMs(
                                 t5SwapReturnNs -
@@ -5241,26 +4562,18 @@ static void renderLoop(ANativeWindow* window)
 
         if (!frontBuffer.active &&
             haveEglFrameId &&
-            (useMs2130
-             ? ms2130FrameTiming.decodeDoneMonotonicNs != 0
-             : frameTiming.frameReadyMonotonicNs != 0)) {
+            planarMjpegFrameTiming.decodeDoneMonotonicNs != 0) {
 
             queuePresentationFrame(
                     presentationTracker,
                     eglFrameId,
-                    useMs2130
-                    ? ms2130FrameTiming.sequence
-                    : frameTiming.sequence,
-                    useMs2130
-                    ? ms2130FrameTiming.decodeDoneMonotonicNs
-                    : frameTiming.frameReadyMonotonicNs,
+                    planarMjpegFrameTiming.sequence,
+                    planarMjpegFrameTiming.decodeDoneMonotonicNs,
                     t4SwapStartMonotonicNs,
                     t5SwapReturnMonotonicNs,
                     compositorTiming,
-                    useMs2130,
-                    useMs2130
-                    ? ms2130FrameTiming.b0ToB2Ms
-                    : 0.0
+                    true,
+                    planarMjpegFrameTiming.b0ToB2Ms
             );
         }
 
@@ -5276,21 +4589,12 @@ static void renderLoop(ANativeWindow* window)
         // ScopeGpu preserves the no-wait / latest-frame policy.
         // ----------------------------------------------------
 
-        if (useMs2130) {
-            scopeGpu.queueFromYuv422Textures(
-                    ms2130YTexture,
-                    ms2130CbTexture,
-                    ms2130CrTexture,
-                    ms2130FrameTiming.sequence
-            );
-        }
-        else {
-            scopeGpu.queueFromPbo(
-                    slot.id,
-                    slot.fence,
-                    frameTiming.sequence
-            );
-        }
+        scopeGpu.queueFromYuv422Textures(
+                planarMjpegYTexture,
+                planarMjpegCbTexture,
+                planarMjpegCrTexture,
+                planarMjpegFrameTiming.sequence
+        );
 
 
         if (frontBuffer.active) {
@@ -5301,24 +4605,23 @@ static void renderLoop(ANativeWindow* window)
         }
 
 
-        if (useMs2130) {
-            if (ms2130FrameTiming.decodeDoneRawNs != 0 &&
-                ms2130FrameTiming.copyDoneRawNs >=
-                    ms2130FrameTiming.decodeDoneRawNs &&
+            if (planarMjpegFrameTiming.decodeDoneRawNs != 0 &&
+                planarMjpegFrameTiming.copyDoneRawNs >=
+                    planarMjpegFrameTiming.decodeDoneRawNs &&
                 t2TextureUploadDoneNs >=
-                    ms2130FrameTiming.copyDoneRawNs &&
+                    planarMjpegFrameTiming.copyDoneRawNs &&
                 t3DrawIssuedNs >= t2TextureUploadDoneNs &&
                 t4SwapStartNs >= t3DrawIssuedNs &&
                 t5SwapReturnNs >= t4SwapStartNs) {
 
                 const double b2ToCopyMs = nsToMs(
-                        ms2130FrameTiming.copyDoneRawNs -
-                        ms2130FrameTiming.decodeDoneRawNs
+                        planarMjpegFrameTiming.copyDoneRawNs -
+                        planarMjpegFrameTiming.decodeDoneRawNs
                 );
 
                 const double copyToB3Ms = nsToMs(
                         t2TextureUploadDoneNs -
-                        ms2130FrameTiming.copyDoneRawNs
+                        planarMjpegFrameTiming.copyDoneRawNs
                 );
 
                 const double b3ToDrawMs = nsToMs(
@@ -5335,28 +4638,28 @@ static void renderLoop(ANativeWindow* window)
 
                 const double b2ToB5Ms = nsToMs(
                         t5SwapReturnNs -
-                        ms2130FrameTiming.decodeDoneRawNs
+                        planarMjpegFrameTiming.decodeDoneRawNs
                 );
 
                 const double b0ToB5Ms =
-                        ms2130FrameTiming.b0ToB2Ms +
+                        planarMjpegFrameTiming.b0ToB2Ms +
                         b2ToB5Ms;
 
                 if (liveUploads <= 5 ||
                     (liveUploads % 30) == 0) {
 
                     LOGI(
-                            "MS2130 render latency seq=%llu path=%s | "
+                            "PLANAR_MJPEG render latency seq=%llu path=%s | "
                             "B0->B2=%.3f ms B2->COPY=%.3f COPY->B3=%.3f "
                             "B3->DRAW=%.3f DRAW->B4=%.3f B4->B5=%.3f | "
                             "B2->B5=%.3f B0->B5=%.3f ms",
                             static_cast<unsigned long long>(
-                                    ms2130FrameTiming.sequence
+                                    planarMjpegFrameTiming.sequence
                             ),
                             frontBuffer.active
                             ? "FRONT_TX"
                             : "EGL_SWAP",
-                            ms2130FrameTiming.b0ToB2Ms,
+                            planarMjpegFrameTiming.b0ToB2Ms,
                             b2ToCopyMs,
                             copyToB3Ms,
                             b3ToDrawMs,
@@ -5367,81 +4670,6 @@ static void renderLoop(ANativeWindow* window)
                     );
                 }
             }
-        }
-        else if (frameTiming.frameReadyNs != 0 &&
-                 frameTiming.copyDoneNs >= frameTiming.frameReadyNs &&
-                 t2TextureUploadDoneNs >= frameTiming.copyDoneNs &&
-                 t3DrawIssuedNs >= t2TextureUploadDoneNs &&
-                 t4SwapStartNs >= t3DrawIssuedNs &&
-                 t5SwapReturnNs >= t4SwapStartNs) {
-
-            LatencySample sample{};
-
-            sample.t0ToT1Ms =
-                    nsToMs(
-                            frameTiming.copyDoneNs -
-                            frameTiming.frameReadyNs
-                    );
-
-            sample.t1ToT2Ms =
-                    nsToMs(
-                            t2TextureUploadDoneNs -
-                            frameTiming.copyDoneNs
-                    );
-
-            sample.t2ToT3Ms =
-                    nsToMs(
-                            t3DrawIssuedNs -
-                            t2TextureUploadDoneNs
-                    );
-
-            sample.t3ToT4Ms =
-                    nsToMs(
-                            t4SwapStartNs -
-                            t3DrawIssuedNs
-                    );
-
-            sample.t4ToT5Ms =
-                    nsToMs(
-                            t5SwapReturnNs -
-                            t4SwapStartNs
-                    );
-
-            sample.totalMs =
-                    nsToMs(
-                            t5SwapReturnNs -
-                            frameTiming.frameReadyNs
-                    );
-
-            if (latencyWindow.count < LATENCY_WINDOW_SAMPLES) {
-                latencyWindow.samples[latencyWindow.count] = sample;
-                ++latencyWindow.count;
-            }
-
-            if (liveUploads <= 5 ||
-                (liveUploads % 30) == 0) {
-
-                LOGI(
-                        "Step 14 latency seq=%llu path=%s | "
-                        "T0->T1=%.3f ms T1->T2=%.3f "
-                        "T2->T3=%.3f T3->T4=%.3f "
-                        "T4->T5=%.3f TOTAL=%.3f ms",
-                        static_cast<unsigned long long>(frameTiming.sequence),
-                        frontBuffer.active
-                        ? "FRONT_TX"
-                        : "EGL_SWAP",
-                        sample.t0ToT1Ms,
-                        sample.t1ToT2Ms,
-                        sample.t2ToT3Ms,
-                        sample.t3ToT4Ms,
-                        sample.t4ToT5Ms,
-                        sample.totalMs
-                );
-            }
-
-            logLatencyWindow(latencyWindow);
-        }
-
 
         ++frame;
 
@@ -5461,46 +4689,16 @@ static void renderLoop(ANativeWindow* window)
 
             LOGI(
                     "Step 14 render stats: "
-                    "renderFrames=%llu "
-                    "presentPath=%s "
-                    "liveUploads=%llu "
-                    "latestSeq=%llu "
-                    "wakeTimeouts=%llu "
-                    "pboBusySkips=%llu "
-                    "copyRaceSkips=%llu "
-                    "ms2130PboBusySkips=%llu "
-                    "ms2130CopyRaceSkips=%llu "
-                    "ms2130LatestSeq=%llu",
-                    static_cast<unsigned long long>(
-                            frame
-                    ),
-                    frontBuffer.active
-                    ? "FRONT_BUFFER"
-                    : "EGL_SWAP",
-                    static_cast<unsigned long long>(
-                            liveUploads
-                    ),
-                    static_cast<unsigned long long>(
-                            latestUvcSequence
-                    ),
-                    static_cast<unsigned long long>(
-                            wakeTimeouts
-                    ),
-                    static_cast<unsigned long long>(
-                            pboBusySkips
-                    ),
-                    static_cast<unsigned long long>(
-                            copyRaceSkips
-                    ),
-                    static_cast<unsigned long long>(
-                            ms2130PboBusySkips
-                    ),
-                    static_cast<unsigned long long>(
-                            ms2130CopyRaceSkips
-                    ),
-                    static_cast<unsigned long long>(
-                            latestMs2130Sequence
-                    )
+                    "renderFrames=%llu presentPath=%s liveUploads=%llu "
+                    "wakeTimeouts=%llu planarMjpegPboBusySkips=%llu "
+                    "planarMjpegCopyRaceSkips=%llu planarMjpegLatestSeq=%llu",
+                    static_cast<unsigned long long>(frame),
+                    frontBuffer.active ? "FRONT_BUFFER" : "EGL_SWAP",
+                    static_cast<unsigned long long>(liveUploads),
+                    static_cast<unsigned long long>(wakeTimeouts),
+                    static_cast<unsigned long long>(planarMjpegPboBusySkips),
+                    static_cast<unsigned long long>(planarMjpegCopyRaceSkips),
+                    static_cast<unsigned long long>(latestPlanarMjpegSequence)
             );
         }
     }
@@ -5560,47 +4758,7 @@ static void renderLoop(ANativeWindow* window)
     );
 
 
-    for (auto& slot : pbo) {
-
-        if (slot.fence != nullptr) {
-
-            glDeleteSync(
-                    slot.fence
-            );
-
-            slot.fence = nullptr;
-        }
-
-
-        if (slot.id != 0) {
-
-            glBindBuffer(
-                    GL_PIXEL_UNPACK_BUFFER,
-                    slot.id
-            );
-
-
-            if (slot.mapped != nullptr) {
-
-                glUnmapBuffer(
-                        GL_PIXEL_UNPACK_BUFFER
-                );
-
-                slot.mapped = nullptr;
-            }
-
-
-            glDeleteBuffers(
-                    1,
-                    &slot.id
-            );
-
-            slot.id = 0;
-        }
-    }
-
-
-    for (auto& slot : ms2130Pbo) {
+    for (auto& slot : planarMjpegPbo) {
 
         if (slot.fence != nullptr) {
             glDeleteSync(slot.fence);
@@ -5641,14 +4799,9 @@ static void renderLoop(ANativeWindow* window)
     scopeUi.shutdown();
 
 
-    glDeleteTextures(
-            1,
-            &texture
-    );
-
-    glDeleteTextures(1, &ms2130YTexture);
-    glDeleteTextures(1, &ms2130CbTexture);
-    glDeleteTextures(1, &ms2130CrTexture);
+    glDeleteTextures(1, &planarMjpegYTexture);
+    glDeleteTextures(1, &planarMjpegCbTexture);
+    glDeleteTextures(1, &planarMjpegCrTexture);
 
 
     glDeleteVertexArrays(
@@ -5658,11 +4811,7 @@ static void renderLoop(ANativeWindow* window)
 
 
     glDeleteProgram(
-            program
-    );
-
-    glDeleteProgram(
-            ms2130Program
+            planarMjpegProgram
     );
 
     // --------------------------------------------------------

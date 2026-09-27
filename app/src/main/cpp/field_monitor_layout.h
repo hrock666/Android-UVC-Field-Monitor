@@ -10,13 +10,9 @@
 
 namespace field_monitor {
 
-static constexpr int FRAME_W = 720;
-static constexpr int FRAME_H = 480;
-static constexpr int PACKED_W = FRAME_W / 2;
-static constexpr size_t YUYV_FRAME_BYTES =
-        static_cast<size_t>(FRAME_W) * FRAME_H * 2u;
-
-static constexpr int WAVEFORM_W = FRAME_W;
+// Scope raster resolution is intentionally independent of the 1280x720
+// source geometry. Horizontal source samples are reduced to 720 waveform bins.
+static constexpr int WAVEFORM_W = 720;
 static constexpr int WAVEFORM_H = 256;
 static constexpr size_t WAVEFORM_ITEMS =
         static_cast<size_t>(WAVEFORM_W) * WAVEFORM_H;

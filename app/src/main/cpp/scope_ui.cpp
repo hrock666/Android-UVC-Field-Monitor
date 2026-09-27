@@ -1229,7 +1229,7 @@ void ScopeUi::drawOverlay(
         addText(
                 inputStatus.x + 12,
                 inputStatus.y + 8,
-                "IN  MS2130    1280x720    60.00P    BT.2020    10-BIT",
+                "IN  UVC MJPEG  1280x720    60.00P    BT.2020    10-BIT",
                 previewText,
                 1
         );
@@ -1496,7 +1496,7 @@ void ScopeUi::drawOverlay(
         // The data shader renders the complete 8-bit code domain.  Mark the
         // absolute code rails separately from the studio-range IRE grid so
         // codes below 16 / above 235 are visibly available without implying
-        // that MS2130 necessarily preserves HDMI footroom/headroom semantics.
+        // that the UVC capture path necessarily preserves HDMI footroom/headroom semantics.
         const int code0Y = waveTop + wavePlotH - 1;
         const int code255Y = waveTop;
 

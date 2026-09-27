@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ms2130_jpeg_decode_diag {
+namespace uvc_mjpeg_decoder {
 
 struct DecodedFrameTiming {
     uint64_t sequence = 0;
@@ -32,11 +32,11 @@ struct DecodedFrameTiming {
     size_t frameBytes = 0;
 };
 
-// Start the MS2130 MJPEG -> planar YCbCr 4:2:2 decoder/latest-frame publisher.
+// Start the UVC MJPEG -> planar YCbCr 4:2:2 decoder/latest-frame publisher.
 // maxFrameBytes is negotiated UVC dwMaxVideoFrameSize.
 bool start(uint32_t maxFrameBytes);
 
-// Feed one completed libusb BULK transfer. callbackNs must use the same
+// Feed one complete UVC payload packet. callbackNs must use the same
 // steady/monotonic clock domain for every call.
 void processPayload(
         const unsigned char* data,
@@ -62,4 +62,4 @@ bool isRunning();
 
 void stop();
 
-}  // namespace ms2130_jpeg_decode_diag
+}  // namespace uvc_mjpeg_decoder

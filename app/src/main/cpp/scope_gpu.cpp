@@ -24,7 +24,6 @@ static constexpr int HIST_BINS = 256;
 static constexpr size_t HIST_ITEMS = static_cast<size_t>(HIST_BINS) * 3u;
 static constexpr size_t HIST_BYTES = HIST_ITEMS * sizeof(uint32_t);
 static constexpr int VECTOR_D = 141;
-static constexpr int VECTOR_RADIUS = 70;
 static constexpr size_t VECTOR_ITEMS = static_cast<size_t>(VECTOR_D) * VECTOR_D;
 static constexpr size_t VECTOR_BYTES = VECTOR_ITEMS * sizeof(uint32_t);
 static constexpr size_t MAXIMA_ITEMS = 6;
@@ -133,137 +132,6 @@ void main()
     return createComputeProgram(source, "scope-clear-wave-parade-hist-vector");
 }
 
-GLuint createScopeAccumulateProgram()
-{
-    static const char* source = R"(#version 310 es
-
-precision highp float;
-precision highp int;
-
-layout(local_size_x = 16, local_size_y = 16) in;
-
-uniform sampler2D uPacked;
-
-layout(std430, binding = 0) buffer WaveformBuffer {
-    uint wave[];
-};
-
-layout(std430, binding = 1) buffer ParadeBuffer {
-    uint parade[];
-};
-
-layout(std430, binding = 2) buffer HistogramBuffer {
-    uint histogram[];
-};
-
-layout(std430, binding = 3) buffer VectorscopeBuffer {
-    uint vectorscope[];
-};
-
-layout(std430, binding = 4) buffer MaximaBuffer {
-    uint maxima[];
-};
-
-void bumpWave(uint x, uint y)
-{
-    atomicAdd(wave[y * 720u + x], 1u);
-}
-
-void bumpParade(int index, int maxIndex)
-{
-    uint v = atomicAdd(parade[index], 1u) + 1u;
-    atomicMax(maxima[maxIndex], v);
-}
-
-void bumpHistogram(int index)
-{
-    uint v = atomicAdd(histogram[index], 1u) + 1u;
-    atomicMax(maxima[4], v);
-}
-
-void bumpVector(int index)
-{
-    uint v = atomicAdd(vectorscope[index], 1u) + 1u;
-    atomicMax(maxima[5], v);
-}
-
-vec3 rgb601Limited(float y8, float u8, float v8)
-{
-    float yn = (y8 - 16.0) / 219.0;
-    float cb = (u8 - 128.0) / 224.0;
-    float cr = (v8 - 128.0) / 224.0;
-
-    vec3 rgb;
-    rgb.r = yn + 1.402000 * cr;
-    rgb.g = yn - 0.344136 * cb - 0.714136 * cr;
-    rgb.b = yn + 1.772000 * cb;
-    return clamp(rgb, 0.0, 1.0);
-}
-
-void accumulatePixel(int x, uint yCode, float u8, float v8)
-{
-    bumpWave(uint(x), yCode);
-
-    vec3 rgb = rgb601Limited(float(yCode), u8, v8);
-
-    int pyR = clamp(160 - int(round(rgb.r * 160.0)), 0, 160);
-    int pyG = clamp(160 - int(round(rgb.g * 160.0)), 0, 160);
-    int pyB = clamp(160 - int(round(rgb.b * 160.0)), 0, 160);
-
-    int pxR = min(73,  (x * 74) / 720);
-    int pxG = min(73,  (x * 74) / 720) + 74;
-    int pxB = min(75,  (x * 76) / 720) + 148;
-
-    bumpParade(pyR * 224 + pxR, 1);
-    bumpParade(pyG * 224 + pxG, 2);
-    bumpParade(pyB * 224 + pxB, 3);
-
-    ivec3 bins = ivec3(round(rgb * 255.0));
-    bumpHistogram(0 * 256 + clamp(bins.r, 0, 255));
-    bumpHistogram(1 * 256 + clamp(bins.g, 0, 255));
-    bumpHistogram(2 * 256 + clamp(bins.b, 0, 255));
-}
-
-void main()
-{
-    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-
-    // Android packed texture: 360x480 RGBA8, one texel per YUYV pair.
-    // R=Y0, G=U, B=Y1, A=V.
-    if (p.x >= 360 || p.y >= 480) {
-        return;
-    }
-
-    vec4 packed = texelFetch(uPacked, p, 0);
-
-    uint y0 = uint(round(packed.r * 255.0));
-    float u8 = round(packed.g * 255.0);
-    uint y1 = uint(round(packed.b * 255.0));
-    float v8 = round(packed.a * 255.0);
-
-    int x0 = p.x * 2;
-    int x1 = x0 + 1;
-
-    accumulatePixel(x0, y0, u8, v8);
-    accumulatePixel(x1, y1, u8, v8);
-
-    // YUYV 4:2:2 has one Cb/Cr sample per packed pair. Keep that
-    // measurement domain directly; do not derive vectorscope chroma from RGB.
-    float cb = (u8 - 128.0) / 224.0;
-    float cr = (v8 - 128.0) / 224.0;
-
-    int gx = int(round(cb * 128.0 + 70.0));
-    int gy = int(round(-cr * 128.0 + 70.0));
-
-    if (gx >= 0 && gx < 141 && gy >= 0 && gy < 141) {
-        bumpVector(gy * 141 + gx);
-    }
-}
-)";
-
-    return createComputeProgram(source, "scope-accumulate-wave-parade-hist-vector");
-}
-
 GLuint createYuv422ScopeAccumulateProgram()
 {
     static const char* source = R"(#version 310 es
@@ -322,7 +190,7 @@ void bumpVector(int index)
 
 vec3 rgb601LimitedCodes(float y8, float cb8, float cr8)
 {
-    // MS2130 decoded planes are treated as nominal BT.601 limited-range codes.
+    // Decoded planar MJPEG planes are treated as nominal BT.601 limited-range codes.
     float y = (y8 - 16.0) / 219.0;
     float cb = (cb8 - 128.0) / 224.0;
     float cr = (cr8 - 128.0) / 224.0;
@@ -396,7 +264,7 @@ void main()
 }
 )";
 
-    return createComputeProgram(source, "scope-accumulate-ms2130-yuv422");
+    return createComputeProgram(source, "scope-accumulate-planar-mjpeg-yuv422");
 }
 
 template <typename T>
@@ -451,10 +319,9 @@ void ScopeGpu::initialize()
     }
 
     clearProgram_ = createScopeClearProgram();
-    accumulateProgram_ = createScopeAccumulateProgram();
     yuv422AccumulateProgram_ = createYuv422ScopeAccumulateProgram();
 
-    if (!clearProgram_ || !accumulateProgram_ || !yuv422AccumulateProgram_) {
+    if (!clearProgram_ || !yuv422AccumulateProgram_) {
         LOGE(
                 "Step 15.4: scope compute program creation failed; "
                 "preview remains enabled");
@@ -462,24 +329,15 @@ void ScopeGpu::initialize()
         return;
     }
 
-    packedLocation_ = glGetUniformLocation(accumulateProgram_, "uPacked");
     yLocation_ = glGetUniformLocation(yuv422AccumulateProgram_, "uY");
     cbLocation_ = glGetUniformLocation(yuv422AccumulateProgram_, "uCb");
     crLocation_ = glGetUniformLocation(yuv422AccumulateProgram_, "uCr");
 
-    if (packedLocation_ < 0 || yLocation_ < 0 || cbLocation_ < 0 || crLocation_ < 0) {
+    if (yLocation_ < 0 || cbLocation_ < 0 || crLocation_ < 0) {
         LOGE("Step 16.0: scope sampler uniform not found; scope backend disabled");
         enabled_ = false;
         return;
     }
-
-    glGenTextures(1, &scopeTexture_);
-    glBindTexture(GL_TEXTURE_2D, scopeTexture_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, PACKED_W, FRAME_H);
 
     for (auto& slot : slots_) {
         glGenBuffers(1, &slot.waveformSsbo);
@@ -526,10 +384,8 @@ void ScopeGpu::initialize()
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     LOGI(
-            "Step 15.4: GPU scope backend enabled: packed=%dx%d "
+            "Step 15.4: GPU scope backend enabled: source=YCbCr422_1280x720 "
             "wave=%dx%d parade=%dx%d histogram=%dx%d vector=%dx%d GLES=%d.%d",
-            PACKED_W,
-            FRAME_H,
             WAVEFORM_W,
             WAVEFORM_H,
             PARADE_PLOT_W,
@@ -603,7 +459,7 @@ void ScopeGpu::poll(bool preDispatchPoll)
             const uint64_t vectorSampleMax = front.expectedVectorSamples;
 
             // Vector bins intentionally reject chroma outside the 141x141
-            // plotted domain, so the accepted total may be below 360x480.
+            // plotted domain, so the accepted total may be below 640x720.
             const bool vectorCountValid = vectorSum <= vectorSampleMax;
 
             if (waveformSum == expectedWave &&
@@ -649,90 +505,6 @@ void ScopeGpu::poll(bool preDispatchPoll)
     }
     else if (result == GL_WAIT_FAILED) {
         LOGE("Step 15.4: scope fence wait failed");
-    }
-}
-
-void ScopeGpu::queueFromPbo(
-        GLuint pboId,
-        GLsync& pboFence,
-        uint64_t sequence)
-{
-    if (!enabled_) {
-        return;
-    }
-
-    Slot& back = slots_[back_];
-
-    if (back.fence != nullptr) {
-        ++busySkips_;
-        return;
-    }
-
-    // One post-present upload feeds all scope compute work. The preview texture
-    // stays independent so the next camera frame never races a scope read.
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, scopeTexture_);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboId);
-
-    glTexSubImage2D(
-            GL_TEXTURE_2D,
-            0,
-            0,
-            0,
-            PACKED_W,
-            FRAME_H,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            nullptr);
-
-    if (pboFence != nullptr) {
-        glDeleteSync(pboFence);
-        pboFence = nullptr;
-    }
-
-    pboFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, back.waveformSsbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, back.paradeSsbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, back.histogramSsbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, back.vectorscopeSsbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, back.maximaSsbo);
-
-    glUseProgram(clearProgram_);
-    glDispatchCompute(
-            static_cast<GLuint>((WAVEFORM_ITEMS + 255u) / 256u),
-            1u,
-            1u);
-
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-    glUseProgram(accumulateProgram_);
-    glUniform1i(packedLocation_, 0);
-    glDispatchCompute(
-            static_cast<GLuint>((PACKED_W + 15) / 16),
-            static_cast<GLuint>((FRAME_H + 15) / 16),
-            1u);
-
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-    back.sequence = sequence;
-    back.expectedPixels = static_cast<uint64_t>(FRAME_W) * FRAME_H;
-    back.expectedVectorSamples = static_cast<uint64_t>(PACKED_W) * FRAME_H;
-    back.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-
-    glFlush();
-    ++dispatches_;
-
-    if (dispatches_ <= 5 || (dispatches_ % 300) == 0) {
-        LOGI(
-                "Step 15.4 scope queued #%llu seq=%llu "
-                "busySkip=%llu preDispatchPromote=%llu",
-                static_cast<unsigned long long>(dispatches_),
-                static_cast<unsigned long long>(sequence),
-                static_cast<unsigned long long>(busySkips_),
-                static_cast<unsigned long long>(preDispatchPromotions_));
     }
 }
 
@@ -801,7 +573,7 @@ void ScopeGpu::queueFromYuv422Textures(
 
     if (dispatches_ <= 5 || (dispatches_ % 300) == 0) {
         LOGI(
-                "Step 16.0 MS2130 scope queued #%llu seq=%llu "
+                "Step 16.0 planar MJPEG scope queued #%llu seq=%llu "
                 "source=YUV422_1280x720 busySkip=%llu preDispatchPromote=%llu",
                 static_cast<unsigned long long>(dispatches_),
                 static_cast<unsigned long long>(sequence),
@@ -838,9 +610,7 @@ GLuint ScopeGpu::frontMaximaSsbo() const
 void ScopeGpu::shutdown()
 {
     if (clearProgram_ != 0 ||
-        accumulateProgram_ != 0 ||
         yuv422AccumulateProgram_ != 0 ||
-        scopeTexture_ != 0 ||
         slots_[0].waveformSsbo != 0 ||
         slots_[1].waveformSsbo != 0) {
 
@@ -890,19 +660,9 @@ void ScopeGpu::shutdown()
         }
     }
 
-    if (scopeTexture_ != 0) {
-        glDeleteTextures(1, &scopeTexture_);
-        scopeTexture_ = 0;
-    }
-
     if (clearProgram_ != 0) {
         glDeleteProgram(clearProgram_);
         clearProgram_ = 0;
-    }
-
-    if (accumulateProgram_ != 0) {
-        glDeleteProgram(accumulateProgram_);
-        accumulateProgram_ = 0;
     }
 
     if (yuv422AccumulateProgram_ != 0) {
@@ -910,7 +670,6 @@ void ScopeGpu::shutdown()
         yuv422AccumulateProgram_ = 0;
     }
 
-    packedLocation_ = -1;
     yLocation_ = -1;
     cbLocation_ = -1;
     crLocation_ = -1;

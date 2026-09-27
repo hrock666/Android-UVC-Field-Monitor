@@ -1,4 +1,4 @@
-#include "ms2130_jpeg_decode_diag.h"
+#include "uvc_mjpeg_decoder.h"
 
 #include <android/log.h>
 #include <turbojpeg.h>
@@ -23,7 +23,7 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-namespace ms2130_jpeg_decode_diag {
+namespace uvc_mjpeg_decoder {
 namespace {
 
 static constexpr uint8_t UVC_STREAM_FID = 0x01;
@@ -447,7 +447,7 @@ static void runColorBarDiagnostic(
 
         if (gColorBarDiag.runs <= 3 || (gColorBarDiag.runs % 10u) == 0u) {
             LOGI(
-                    "MS2130 COLORBAR DIAG: no stable 7-bar match seq=%llu "
+                    "UVC MJPEG COLORBAR DIAG: no stable 7-bar match seq=%llu "
                     "score601=%.4f score709=%.4f delta=%.4f "
                     "roiStdMax=%.2f whiteChroma=%.2f colorChroma=%.2f",
                     static_cast<unsigned long long>(sequence),
@@ -484,7 +484,7 @@ static void runColorBarDiagnostic(
     if (gColorBarDiag.consecutive <= 3 ||
         (gColorBarDiag.runs % 10u) == 0u) {
         LOGI(
-                "MS2130 COLORBAR DIAG: seq=%llu candidate=%s streak=%d/3 "
+                "UVC MJPEG COLORBAR DIAG: seq=%llu candidate=%s streak=%d/3 "
                 "score601=%.4f score709=%.4f delta=%.4f "
                 "rangeHint=%s full=%.4f limited=%.4f "
                 "roiStdMax=%.2f whiteChroma=%.2f",
@@ -508,7 +508,7 @@ static void runColorBarDiagnostic(
         gColorBarDiag.locked = candidate;
 
         LOGI(
-                "MS2130 COLORBAR MATRIX LOCK: %s rangeHint=%s "
+                "UVC MJPEG COLORBAR MATRIX LOCK: %s rangeHint=%s "
                 "score601=%.4f score709=%.4f "
                 "(diagnostic only; preview/scope matrix is NOT auto-switched)",
                 matrixName(candidate),
@@ -518,7 +518,7 @@ static void runColorBarDiagnostic(
         );
 
         LOGI(
-                "MS2130 COLORBAR YCbCr means: "
+                "UVC MJPEG COLORBAR YCbCr means: "
                 "W=%.1f/%.1f/%.1f Y=%.1f/%.1f/%.1f "
                 "C=%.1f/%.1f/%.1f G=%.1f/%.1f/%.1f "
                 "M=%.1f/%.1f/%.1f R=%.1f/%.1f/%.1f "
@@ -793,7 +793,7 @@ static void runRangeDiagnostic(
 
         if (gRangeDiag.runs <= 3 || (gRangeDiag.runs % 10u) == 0u) {
             LOGI(
-                    "MS2130 RANGE DIAG: no stable 9-gray match seq=%llu "
+                    "UVC MJPEG RANGE DIAG: no stable 9-gray match seq=%llu "
                     "rmseFull=%.2f rmseStudio=%.2f delta=%.2f "
                     "fit=%.5f*x%+.2f fitRmse=%.2f span=%.1f "
                     "roiStdMax=%.2f neutralChromaMax=%.2f monotonic=%s",
@@ -824,7 +824,7 @@ static void runRangeDiagnostic(
     if (gRangeDiag.consecutive <= 3 ||
         (gRangeDiag.runs % 10u) == 0u) {
         LOGI(
-                "MS2130 RANGE DIAG: seq=%llu candidate=%s streak=%d/3 "
+                "UVC MJPEG RANGE DIAG: seq=%llu candidate=%s streak=%d/3 "
                 "rmseFull=%.2f rmseStudio=%.2f delta=%.2f "
                 "fit=%.5f*x%+.2f fitRmse=%.2f "
                 "Y=[%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f]",
@@ -855,7 +855,7 @@ static void runRangeDiagnostic(
         gRangeDiag.locked = candidate;
 
         LOGI(
-                "MS2130 RANGE LOCK: %s rmseFull=%.2f rmseStudio=%.2f "
+                "UVC MJPEG RANGE LOCK: %s rmseFull=%.2f rmseStudio=%.2f "
                 "fitY=%.5f*x%+.2f fitRmse=%.2f "
                 "black=%.1f code16=%.1f code235=%.1f white=%.1f "
                 "(effective HDMI source-code -> decoded JPEG-Y mapping; "
@@ -1081,7 +1081,7 @@ static void maybeLogStatsLocked(uint64_t timestampNs)
             : gStats.jpegBytesMin;
 
     LOGI(
-            "MS2130 TurboJPEG YUV422 stats: fps=%.2f "
+            "UVC MJPEG TurboJPEG YUV422 stats: fps=%.2f "
             "jpegBytes avg=%.0f min=%zu max=%zu "
             "queueMs avg=%.3f p95=%.3f max=%.3f "
             "headerMs avg=%.3f p95=%.3f max=%.3f "
@@ -1137,10 +1137,10 @@ static void maybeLogStatsLocked(uint64_t timestampNs)
 
 static void workerLoop()
 {
-    pthread_setname_np(pthread_self(), "MS2130-JPEG");
+    pthread_setname_np(pthread_self(), "UVC-MJPEG");
 
     LOGI(
-            "MS2130 TurboJPEG worker started "
+            "UVC MJPEG TurboJPEG worker started "
             "(persistent decoder, planar Y/Cb/Cr 4:2:2, latest-frame output)"
     );
 
@@ -1210,7 +1210,7 @@ static void workerLoop()
                 crPlaneHeight != EXPECTED_HEIGHT) {
 
                 LOGE(
-                        "MS2130 TurboJPEG geometry unsupported: "
+                        "UVC MJPEG TurboJPEG geometry unsupported: "
                         "%dx%d subsamp=%d colorspace=%d planes="
                         "Y=%dx%d Cb=%dx%d Cr=%dx%d expected=1280x720 TJSAMP_422/TJCS_YCbCr",
                         width,
@@ -1270,7 +1270,7 @@ static void workerLoop()
 
             if (!ok && gStats.failed < 10) {
                 LOGE(
-                        "MS2130 TurboJPEG planar decode error: %s",
+                        "UVC MJPEG TurboJPEG planar decode error: %s",
                         tjGetErrorStr2(gDecoder)
                 );
             }
@@ -1337,7 +1337,7 @@ static void workerLoop()
 
             if (!gOutputInfoLogged) {
                 LOGI(
-                        "MS2130 TurboJPEG output: %dx%d subsamp=TJSAMP_422 "
+                        "UVC MJPEG TurboJPEG output: %dx%d subsamp=TJSAMP_422 "
                         "colorspace=%d Y=%zux%d Cb=%zux%d Cr=%zux%d "
                         "frameBytes=%zu (no CPU YUV->RGB)",
                         width,
@@ -1356,7 +1356,7 @@ static void workerLoop()
 
             if (gStats.decoded <= 5) {
                 LOGI(
-                        "MS2130 TurboJPEG DECODE #%llu: jpeg=%zu queueMs=%.3f "
+                        "UVC MJPEG TurboJPEG DECODE #%llu: jpeg=%zu queueMs=%.3f "
                         "headerMs=%.3f decodeCallMs=%.3f totalMs=%.3f "
                         "B0toB2Ms=%.3f slot=%d",
                         static_cast<unsigned long long>(gStats.decoded),
@@ -1375,7 +1375,7 @@ static void workerLoop()
 
             if (gStats.failed <= 10) {
                 LOGE(
-                        "MS2130 TurboJPEG decode failed: seq=%llu "
+                        "UVC MJPEG TurboJPEG decode failed: seq=%llu "
                         "header=%d decode=%d bytes=%zu slot=%d error=%s",
                         static_cast<unsigned long long>(job.sequence),
                         headerResult,
@@ -1390,7 +1390,7 @@ static void workerLoop()
         maybeLogStatsLocked(decodeDoneNs);
     }
 
-    LOGI("MS2130 TurboJPEG worker stopped");
+    LOGI("UVC MJPEG TurboJPEG worker stopped");
 }
 
 
@@ -1426,14 +1426,14 @@ bool start(uint32_t maxFrameBytes)
     stop();
 
     if (maxFrameBytes < 4) {
-        LOGE("MS2130 TurboJPEG: invalid maxFrame=%u", maxFrameBytes);
+        LOGE("UVC MJPEG TurboJPEG: invalid maxFrame=%u", maxFrameBytes);
         return false;
     }
 
     gDecoder = tjInitDecompress();
 
     if (gDecoder == nullptr) {
-        LOGE("MS2130 TurboJPEG: tjInitDecompress failed");
+        LOGE("UVC MJPEG TurboJPEG: tjInitDecompress failed");
         return false;
     }
 
@@ -1474,7 +1474,7 @@ bool start(uint32_t maxFrameBytes)
     gWorker = std::thread(workerLoop);
 
     LOGI(
-            "MS2130 TurboJPEG decoder START: maxFrame=%u "
+            "UVC MJPEG TurboJPEG decoder START: maxFrame=%u "
             "output=YCbCr422 planar 1280x720 bytes=%zu",
             maxFrameBytes,
             YUV422_FRAME_BYTES
@@ -1816,4 +1816,4 @@ void stop()
     }
 }
 
-}  // namespace ms2130_jpeg_decode_diag
+}  // namespace uvc_mjpeg_decoder

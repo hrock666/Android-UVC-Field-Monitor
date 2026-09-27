@@ -142,7 +142,7 @@ add_library(
         SHARED
         native-lib.cpp
         ms2109_pu_controls.cpp
-        ms2130_jpeg_decode_diag.cpp
+        uvc_mjpeg_decoder.cpp
         scope_gpu.cpp
         scope_ui.cpp
         uvc_device.cpp

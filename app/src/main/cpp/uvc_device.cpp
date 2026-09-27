@@ -1,7 +1,7 @@
 #include "uvc_device.h"
 #include "uvc_stream.h"
 #include "ms2109_pu_controls.h"
-#include "ms2130_jpeg_decode_diag.h"
+#include "uvc_mjpeg_decoder.h"
 
 #include <android/log.h>
 #include <libusb.h>
@@ -62,11 +62,9 @@ static const SupportedUsbDevice* findSupportedUsbDevice(
 static constexpr int UVC_VIDEO_STREAMING_INTERFACE = 1;
 static constexpr uint8_t UVC_VIDEO_ENDPOINT = 0x83;
 
-static constexpr int TARGET_UVC_WIDTH = 720;
-static constexpr int TARGET_UVC_HEIGHT = 480;
-static constexpr uint32_t TARGET_UVC_INTERVAL_100NS = 333333;
-static constexpr uint32_t TARGET_YUYV_FRAME_BYTES =
-        TARGET_UVC_WIDTH * TARGET_UVC_HEIGHT * 2;
+static constexpr int TARGET_UVC_WIDTH = 1280;
+static constexpr int TARGET_UVC_HEIGHT = 720;
+static constexpr uint32_t TARGET_UVC_INTERVAL_100NS = 166666;
 
 static constexpr int TARGET_STREAM_ALT_SETTING = 3;
 static constexpr uint32_t TARGET_STREAM_ALT_CAPACITY = 3072;
@@ -107,8 +105,31 @@ static constexpr uint8_t UVC_REQ_IN =
         LIBUSB_RECIPIENT_INTERFACE;
 
 
+enum class UvcVideoFormat {
+    Unknown = 0,
+    Mjpeg,
+};
+
+
+static const char* uvcVideoFormatName(
+        UvcVideoFormat format)
+{
+    switch (format) {
+        case UvcVideoFormat::Mjpeg:
+            return "MJPEG";
+
+        case UvcVideoFormat::Unknown:
+        default:
+            return "UNKNOWN";
+    }
+}
+
+
 struct UvcStreamMode {
     bool valid = false;
+
+    UvcVideoFormat format =
+            UvcVideoFormat::Unknown;
 
     uint8_t formatIndex = 0;
     uint8_t frameIndex = 0;
@@ -272,65 +293,7 @@ static int getIsoEffectiveBytesPerMicroframe(
 }
 
 
-static bool isYuy2Guid(
-        const unsigned char* guid,
-        size_t length)
-{
-    if (guid == nullptr ||
-        length < 16) {
-
-        return false;
-    }
-
-    static constexpr unsigned char YUY2_GUID[16] = {
-            0x59, 0x55, 0x59, 0x32,
-            0x00, 0x00, 0x10, 0x00,
-            0x80, 0x00, 0x00, 0xAA,
-            0x00, 0x38, 0x9B, 0x71
-    };
-
-    return
-            std::memcmp(
-                    guid,
-                    YUY2_GUID,
-                    sizeof(YUY2_GUID)
-            ) == 0;
-}
-
-
-static void logFormatGuid(
-        const unsigned char* guid)
-{
-    if (guid == nullptr) {
-        return;
-    }
-
-    char fourcc[5] = {
-            static_cast<char>(guid[0]),
-            static_cast<char>(guid[1]),
-            static_cast<char>(guid[2]),
-            static_cast<char>(guid[3]),
-            '\0'
-    };
-
-    LOGI(
-            "    Format GUID FOURCC='%s' "
-            "GUID=%02X%02X%02X%02X-"
-            "%02X%02X-%02X%02X-"
-            "%02X%02X-"
-            "%02X%02X%02X%02X%02X%02X",
-            fourcc,
-            guid[0], guid[1], guid[2], guid[3],
-            guid[4], guid[5],
-            guid[6], guid[7],
-            guid[8], guid[9],
-            guid[10], guid[11], guid[12],
-            guid[13], guid[14], guid[15]
-    );
-}
-
-
-static bool chooseDiscrete30FpsInterval(
+static bool chooseDiscreteTargetInterval(
         const unsigned char* descriptor,
         size_t descriptorLength,
         uint8_t intervalCount,
@@ -401,7 +364,7 @@ static bool chooseDiscrete30FpsInterval(
 }
 
 
-static bool chooseContinuous30FpsInterval(
+static bool chooseContinuousTargetInterval(
         const unsigned char* descriptor,
         size_t descriptorLength,
         uint32_t& selectedInterval)
@@ -701,10 +664,9 @@ static bool detectUvcTransport(
 
     if (foundIsoEndpoint) {
 
-        // The current ISO backend is validated for the classic MS2109
-        // 720x480 YUYV30 path: ALT3, 3072 bytes/microframe. Keep this
-        // constraint explicit instead of silently selecting an unsupported
-        // ISO layout.
+        // The ISO backend is validated for the classic MS2109 layout:
+        // ALT3, 3072 bytes/microframe. The required video format is MJPEG;
+        // the endpoint scheduling/layout constraint remains unchanged.
         if (bestIsoAlt != TARGET_STREAM_ALT_SETTING ||
             bestIsoCapacity != TARGET_STREAM_ALT_CAPACITY) {
 
@@ -764,386 +726,198 @@ static bool discoverTargetUvcMode(
     selectedMode = {};
 
     if (device == nullptr) {
-
-        LOGE(
-                "discoverTargetUvcMode: "
-                "device is null"
-        );
-
+        LOGE("discoverTargetUvcMode: device is null");
         return false;
     }
 
-    libusb_config_descriptor* config =
-            nullptr;
-
-    int r =
+    libusb_config_descriptor* config = nullptr;
+    const int r =
             libusb_get_active_config_descriptor(
                     device,
                     &config
             );
 
     if (r != LIBUSB_SUCCESS) {
-
         LOGE(
-                "Step 9: get active config "
-                "failed: %d (%s)",
+                "Step 9: get active config failed: %d (%s)",
                 r,
                 libusb_error_name(r)
         );
-
         return false;
     }
 
     LOGI(
-            "Step 9: scanning UVC "
-            "VideoStreaming descriptors "
-            "for %dx%d YUYV @ 30 fps",
+            "Step 9: scanning UVC VideoStreaming descriptors "
+            "for required %dx%d MJPEG @ %.3f fps",
             TARGET_UVC_WIDTH,
-            TARGET_UVC_HEIGHT
+            TARGET_UVC_HEIGHT,
+            interval100nsToFps(TARGET_UVC_INTERVAL_100NS)
     );
 
     bool foundVsAlt0 = false;
-    bool currentFormatIsYuy2 = false;
+    uint8_t currentMjpegFormatIndex = 0;
+    UvcStreamMode mjpegCandidate{};
 
-    uint8_t currentFormatIndex = 0;
-    uint8_t currentBitsPerPixel = 0;
+    for (uint8_t i = 0; i < config->bNumInterfaces; ++i) {
+        const libusb_interface& iface = config->interface[i];
 
-    UvcStreamMode candidate{};
+        for (int a = 0; a < iface.num_altsetting; ++a) {
+            const libusb_interface_descriptor& alt = iface.altsetting[a];
 
-    for (uint8_t i = 0;
-         i < config->bNumInterfaces;
-         ++i) {
-
-        const libusb_interface& iface =
-                config->interface[i];
-
-        for (int a = 0;
-             a < iface.num_altsetting;
-             ++a) {
-
-            const libusb_interface_descriptor& alt =
-                    iface.altsetting[a];
-
-            if (alt.bInterfaceNumber !=
-                    UVC_VIDEO_STREAMING_INTERFACE ||
+            if (alt.bInterfaceNumber != UVC_VIDEO_STREAMING_INTERFACE ||
                 alt.bAlternateSetting != 0 ||
-                alt.bInterfaceClass !=
-                    LIBUSB_CLASS_VIDEO ||
+                alt.bInterfaceClass != LIBUSB_CLASS_VIDEO ||
                 alt.bInterfaceSubClass != 2) {
-
                 continue;
             }
 
             foundVsAlt0 = true;
 
             LOGI(
-                    "Step 9: VS IF=%u ALT=%u "
-                    "extraLength=%d",
+                    "Step 9: VS IF=%u ALT=%u extraLength=%d",
                     alt.bInterfaceNumber,
                     alt.bAlternateSetting,
                     alt.extra_length
             );
 
-            const unsigned char* p =
-                    alt.extra;
+            const unsigned char* p = alt.extra;
+            int remaining = alt.extra_length;
 
-            int remaining =
-                    alt.extra_length;
+            while (p != nullptr && remaining >= 3) {
+                const uint8_t length = p[0];
+                const uint8_t descriptorType = p[1];
+                const uint8_t descriptorSubtype = p[2];
 
-            while (p != nullptr &&
-                   remaining >= 3) {
-
-                const uint8_t length =
-                        p[0];
-
-                const uint8_t descriptorType =
-                        p[1];
-
-                const uint8_t descriptorSubtype =
-                        p[2];
-
-                if (length < 3 ||
-                    length > remaining) {
-
+                if (length < 3 || length > remaining) {
                     LOGE(
-                            "Step 9: malformed "
-                            "VS descriptor "
+                            "Step 9: malformed VS descriptor "
                             "length=%u remaining=%d",
                             length,
                             remaining
                     );
-
-                    libusb_free_config_descriptor(
-                            config
-                    );
-
+                    libusb_free_config_descriptor(config);
                     return false;
                 }
 
                 if (descriptorType == 0x24) {
-
-                    switch (
-                        descriptorSubtype) {
-
-                        case 0x04:
+                    switch (descriptorSubtype) {
+                        case 0x06:  // VS_FORMAT_MJPEG
                         {
-                            if (length < 27) {
-
+                            if (length < 11) {
                                 LOGE(
-                                        "Step 9: short "
-                                        "VS_FORMAT_UNCOMPRESSED "
-                                        "len=%u",
+                                        "Step 9: short VS_FORMAT_MJPEG len=%u",
                                         length
                                 );
-
-                                libusb_free_config_descriptor(
-                                        config
-                                );
-
+                                libusb_free_config_descriptor(config);
                                 return false;
                             }
 
-                            currentFormatIndex =
-                                    p[3];
-
-                            const uint8_t frameDescriptorCount =
-                                    p[4];
-
-                            const unsigned char* guid =
-                                    p + 5;
-
-                            currentBitsPerPixel =
-                                    p[21];
-
-                            const uint8_t defaultFrameIndex =
-                                    p[22];
-
-                            currentFormatIsYuy2 =
-                                    isYuy2Guid(
-                                            guid,
-                                            16
-                                    );
+                            currentMjpegFormatIndex = p[3];
 
                             LOGI(
-                                    "  VS_FORMAT_UNCOMPRESSED: "
-                                    "formatIndex=%u frames=%u "
-                                    "bitsPerPixel=%u "
-                                    "defaultFrameIndex=%u "
-                                    "YUY2=%s",
-                                    currentFormatIndex,
-                                    frameDescriptorCount,
-                                    currentBitsPerPixel,
-                                    defaultFrameIndex,
-                                    currentFormatIsYuy2
-                                    ? "YES"
-                                    : "NO"
+                                    "  VS_FORMAT_MJPEG: formatIndex=%u "
+                                    "frames=%u defaultFrameIndex=%u",
+                                    currentMjpegFormatIndex,
+                                    p[4],
+                                    p[6]
                             );
-
-                            logFormatGuid(
-                                    guid
-                            );
-
                             break;
                         }
 
-                        case 0x05:
+                        case 0x07:  // VS_FRAME_MJPEG
                         {
                             if (length < 26) {
-
                                 LOGE(
-                                        "Step 9: short "
-                                        "VS_FRAME_UNCOMPRESSED "
-                                        "len=%u",
+                                        "Step 9: short VS_FRAME_MJPEG len=%u",
                                         length
                                 );
-
-                                libusb_free_config_descriptor(
-                                        config
-                                );
-
+                                libusb_free_config_descriptor(config);
                                 return false;
                             }
 
-                            const uint8_t frameIndex =
-                                    p[3];
+                            if (currentMjpegFormatIndex == 0) {
+                                break;
+                            }
 
-                            const uint16_t width =
-                                    readLe16(
-                                            p + 5
-                                    );
-
-                            const uint16_t height =
-                                    readLe16(
-                                            p + 7
-                                    );
-
-                            const uint32_t minBitRate =
-                                    readLe32(
-                                            p + 9
-                                    );
-
-                            const uint32_t maxBitRate =
-                                    readLe32(
-                                            p + 13
-                                    );
-
-                            const uint32_t maxFrameBufferSize =
-                                    readLe32(
-                                            p + 17
-                                    );
-
-                            const uint32_t defaultInterval =
-                                    readLe32(
-                                            p + 21
-                                    );
-
-                            const uint8_t intervalType =
-                                    p[25];
+                            const uint8_t frameIndex = p[3];
+                            const uint16_t width = readLe16(p + 5);
+                            const uint16_t height = readLe16(p + 7);
+                            const uint32_t maxFrameBufferSize = readLe32(p + 17);
+                            const uint32_t defaultInterval = readLe32(p + 21);
+                            const uint8_t intervalType = p[25];
 
                             LOGI(
-                                    "    VS_FRAME_UNCOMPRESSED: "
-                                    "formatIndex=%u "
-                                    "frameIndex=%u "
-                                    "%ux%u maxFrame=%u "
-                                    "defaultInterval=%u "
-                                    "(%.3f fps) "
-                                    "intervalType=%u "
-                                    "bitRate=%u..%u",
-                                    currentFormatIndex,
+                                    "    VS_FRAME_MJPEG: formatIndex=%u "
+                                    "frameIndex=%u %ux%u maxFrame=%u "
+                                    "defaultInterval=%u (%.3f fps) intervalType=%u",
+                                    currentMjpegFormatIndex,
                                     frameIndex,
                                     width,
                                     height,
                                     maxFrameBufferSize,
                                     defaultInterval,
-                                    interval100nsToFps(
-                                            defaultInterval
-                                    ),
-                                    intervalType,
-                                    minBitRate,
-                                    maxBitRate
+                                    interval100nsToFps(defaultInterval),
+                                    intervalType
                             );
 
-                            uint32_t selectedInterval =
-                                    0;
-
-                            bool has30Fps =
-                                    false;
-
-                            if (intervalType == 0) {
-
-                                has30Fps =
-                                        chooseContinuous30FpsInterval(
-                                                p,
-                                                length,
-                                                selectedInterval
-                                        );
-                            }
-                            else {
-
-                                has30Fps =
-                                        chooseDiscrete30FpsInterval(
-                                                p,
-                                                length,
-                                                intervalType,
-                                                selectedInterval
-                                        );
+                            if (width != TARGET_UVC_WIDTH ||
+                                height != TARGET_UVC_HEIGHT) {
+                                break;
                             }
 
-                            if (currentFormatIsYuy2 &&
-                                width ==
-                                    TARGET_UVC_WIDTH &&
-                                height ==
-                                    TARGET_UVC_HEIGHT &&
-                                has30Fps) {
+                            uint32_t selectedInterval = 0;
+                            const bool hasTargetInterval =
+                                    intervalType == 0
+                                    ? chooseContinuousTargetInterval(
+                                            p,
+                                            length,
+                                            selectedInterval
+                                    )
+                                    : chooseDiscreteTargetInterval(
+                                            p,
+                                            length,
+                                            intervalType,
+                                            selectedInterval
+                                    );
 
-                                candidate.valid =
-                                        true;
-
-                                candidate.formatIndex =
-                                        currentFormatIndex;
-
-                                candidate.frameIndex =
-                                        frameIndex;
-
-                                candidate.width =
-                                        width;
-
-                                candidate.height =
-                                        height;
-
-                                candidate.frameInterval100ns =
-                                        selectedInterval;
-
-                                candidate.maxVideoFrameBufferSize =
-                                        maxFrameBufferSize;
-
-                                candidate.bitsPerPixel =
-                                        currentBitsPerPixel;
-
-                                LOGI(
-                                        "    >>> TARGET MATCH: "
-                                        "formatIndex=%u "
-                                        "frameIndex=%u "
-                                        "interval=%u "
-                                        "(%.3f fps) "
-                                        "maxFrame=%u",
-                                        candidate.formatIndex,
-                                        candidate.frameIndex,
-                                        candidate.frameInterval100ns,
-                                        interval100nsToFps(
-                                                candidate.frameInterval100ns
-                                        ),
-                                        candidate.maxVideoFrameBufferSize
-                                );
+                            if (!hasTargetInterval) {
+                                break;
                             }
 
-                            break;
-                        }
-
-                        case 0x06:
-                        {
-                            currentFormatIsYuy2 =
-                                    false;
-
-                            currentFormatIndex =
-                                    length >= 4
-                                    ? p[3]
-                                    : 0;
-
-                            currentBitsPerPixel =
-                                    0;
+                            mjpegCandidate.valid = true;
+                            mjpegCandidate.format = UvcVideoFormat::Mjpeg;
+                            mjpegCandidate.formatIndex = currentMjpegFormatIndex;
+                            mjpegCandidate.frameIndex = frameIndex;
+                            mjpegCandidate.width = width;
+                            mjpegCandidate.height = height;
+                            mjpegCandidate.frameInterval100ns = selectedInterval;
+                            mjpegCandidate.maxVideoFrameBufferSize =
+                                    maxFrameBufferSize;
+                            mjpegCandidate.bitsPerPixel = 0;
 
                             LOGI(
-                                    "  VS_FORMAT_MJPEG: "
-                                    "formatIndex=%u",
-                                    currentFormatIndex
+                                    "    >>> REQUIRED MJPEG MATCH: "
+                                    "formatIndex=%u frameIndex=%u "
+                                    "interval=%u (%.3f fps) maxFrame=%u",
+                                    mjpegCandidate.formatIndex,
+                                    mjpegCandidate.frameIndex,
+                                    mjpegCandidate.frameInterval100ns,
+                                    interval100nsToFps(
+                                            mjpegCandidate.frameInterval100ns
+                                    ),
+                                    mjpegCandidate.maxVideoFrameBufferSize
                             );
-
                             break;
                         }
 
-                        case 0x07:
-                        {
-                            if (length >= 9) {
-
-                                LOGI(
-                                        "    VS_FRAME_MJPEG: "
-                                        "formatIndex=%u "
-                                        "frameIndex=%u "
-                                        "%ux%u",
-                                        currentFormatIndex,
-                                        p[3],
-                                        readLe16(
-                                                p + 5
-                                        ),
-                                        readLe16(
-                                                p + 7
-                                        )
-                                );
-                            }
-
+                        // Any non-MJPEG format descriptor ends the current
+                        // MJPEG-format context. Uncompressed formats are never
+                        // candidates in the field-monitor pipeline.
+                        case 0x04:  // VS_FORMAT_UNCOMPRESSED
+                        case 0x10:  // VS_FORMAT_FRAME_BASED
+                        case 0x12:  // VS_FORMAT_STREAM_BASED
+                            currentMjpegFormatIndex = 0;
                             break;
-                        }
 
                         default:
                             break;
@@ -1156,450 +930,41 @@ static bool discoverTargetUvcMode(
         }
     }
 
-    libusb_free_config_descriptor(
-            config
-    );
+    libusb_free_config_descriptor(config);
 
     if (!foundVsAlt0) {
-
-        LOGE(
-                "Step 9: VideoStreaming "
-                "IF1 ALT0 not found"
-        );
-
+        LOGE("Step 9: VideoStreaming IF1 ALT0 not found");
         return false;
     }
 
-    if (!candidate.valid) {
-
+    if (!mjpegCandidate.valid) {
         LOGE(
-                "Step 9: target YUYV "
-                "%dx%d @ 30 fps "
-                "not advertised",
+                "Step 9: required %dx%d MJPEG @ %.3f fps "
+                "is not advertised; fallback is disabled",
                 TARGET_UVC_WIDTH,
-                TARGET_UVC_HEIGHT
+                TARGET_UVC_HEIGHT,
+                interval100nsToFps(TARGET_UVC_INTERVAL_100NS)
         );
-
         return false;
     }
 
-    LOGI(
-            "Step 9: expected YUYV "
-            "frame bytes=%u, "
-            "descriptor maxFrame=%u",
-            TARGET_YUYV_FRAME_BYTES,
-            candidate.maxVideoFrameBufferSize
-    );
-
-    if (candidate.maxVideoFrameBufferSize != 0 &&
-        candidate.maxVideoFrameBufferSize <
-                TARGET_YUYV_FRAME_BYTES) {
-
+    if (mjpegCandidate.maxVideoFrameBufferSize < 4) {
         LOGE(
-                "Step 9: descriptor "
-                "frame buffer is too small "
-                "for 720x480 YUYV"
+                "Step 9: MJPEG descriptor maxFrame is invalid: %u",
+                mjpegCandidate.maxVideoFrameBufferSize
         );
-
         return false;
     }
 
-    selectedMode =
-            candidate;
+    selectedMode = mjpegCandidate;
 
     LOGI(
-            "Step 9 selected mode: "
-            "formatIndex=%u frameIndex=%u "
-            "%ux%u YUYV "
-            "interval=%u (%.3f fps) "
-            "bitsPerPixel=%u maxFrame=%u",
+            "Step 9 selected mode: formatIndex=%u frameIndex=%u "
+            "%ux%u MJPEG interval=%u (%.3f fps) maxFrame=%u",
             selectedMode.formatIndex,
             selectedMode.frameIndex,
             selectedMode.width,
             selectedMode.height,
-            selectedMode.frameInterval100ns,
-            interval100nsToFps(
-                    selectedMode.frameInterval100ns
-            ),
-            selectedMode.bitsPerPixel,
-            selectedMode.maxVideoFrameBufferSize
-    );
-
-    return true;
-}
-
-
-static bool chooseMjpeg60FpsInterval(
-        const unsigned char* descriptor,
-        size_t descriptorLength,
-        uint8_t intervalType,
-        uint32_t& selectedInterval)
-{
-    static constexpr size_t INTERVAL_OFFSET = 26;
-    static constexpr size_t CONTINUOUS_LENGTH = 38;
-    static constexpr uint32_t TARGET_INTERVAL_100NS = 166667;
-    static constexpr uint32_t INTERVAL_TOLERANCE_100NS = 1000;
-
-    selectedInterval = 0;
-
-    if (descriptor == nullptr ||
-        descriptorLength < INTERVAL_OFFSET) {
-
-        return false;
-    }
-
-    if (intervalType == 0) {
-
-        if (descriptorLength < CONTINUOUS_LENGTH) {
-            return false;
-        }
-
-        const uint32_t minInterval =
-                readLe32(descriptor + 26);
-
-        const uint32_t maxInterval =
-                readLe32(descriptor + 30);
-
-        const uint32_t step =
-                readLe32(descriptor + 34);
-
-        LOGI(
-                "      MJPEG continuous interval: "
-                "min=%u (%.3f fps) max=%u (%.3f fps) step=%u",
-                minInterval,
-                interval100nsToFps(minInterval),
-                maxInterval,
-                interval100nsToFps(maxInterval),
-                step
-        );
-
-        if (TARGET_INTERVAL_100NS < minInterval ||
-            TARGET_INTERVAL_100NS > maxInterval) {
-
-            return false;
-        }
-
-        uint32_t candidate =
-                TARGET_INTERVAL_100NS;
-
-        if (step != 0) {
-
-            const uint32_t delta =
-                    TARGET_INTERVAL_100NS - minInterval;
-
-            const uint32_t steps =
-                    (delta + (step / 2)) / step;
-
-            candidate =
-                    minInterval + steps * step;
-
-            if (candidate > maxInterval) {
-                candidate = maxInterval;
-            }
-        }
-
-        const uint32_t diff =
-                candidate > TARGET_INTERVAL_100NS
-                ? candidate - TARGET_INTERVAL_100NS
-                : TARGET_INTERVAL_100NS - candidate;
-
-        if (diff > INTERVAL_TOLERANCE_100NS) {
-            return false;
-        }
-
-        selectedInterval = candidate;
-        return true;
-    }
-
-    if (descriptorLength <
-            INTERVAL_OFFSET +
-            static_cast<size_t>(intervalType) * 4) {
-
-        return false;
-    }
-
-    uint32_t bestInterval = 0;
-    uint32_t bestDiff =
-            std::numeric_limits<uint32_t>::max();
-
-    for (uint8_t i = 0;
-         i < intervalType;
-         ++i) {
-
-        const uint32_t interval =
-                readLe32(
-                        descriptor +
-                        INTERVAL_OFFSET +
-                        static_cast<size_t>(i) * 4
-                );
-
-        LOGI(
-                "      MJPEG interval[%u]=%u (%.3f fps)",
-                i,
-                interval,
-                interval100nsToFps(interval)
-        );
-
-        const uint32_t diff =
-                interval > TARGET_INTERVAL_100NS
-                ? interval - TARGET_INTERVAL_100NS
-                : TARGET_INTERVAL_100NS - interval;
-
-        if (diff < bestDiff) {
-            bestDiff = diff;
-            bestInterval = interval;
-        }
-    }
-
-    if (bestInterval == 0 ||
-        bestDiff > INTERVAL_TOLERANCE_100NS) {
-
-        return false;
-    }
-
-    selectedInterval = bestInterval;
-    return true;
-}
-
-
-static bool discoverMs2130Mjpeg720p60Mode(
-        libusb_device* device,
-        UvcStreamMode& selectedMode)
-{
-    static constexpr uint16_t TARGET_WIDTH = 1280;
-    static constexpr uint16_t TARGET_HEIGHT = 720;
-
-    selectedMode = {};
-
-    if (device == nullptr) {
-        LOGE("MS2130 Step 9: device is null");
-        return false;
-    }
-
-    libusb_config_descriptor* config = nullptr;
-
-    const int r =
-            libusb_get_active_config_descriptor(
-                    device,
-                    &config
-            );
-
-    if (r != LIBUSB_SUCCESS) {
-
-        LOGE(
-                "MS2130 Step 9: get active config failed: %d (%s)",
-                r,
-                libusb_error_name(r)
-        );
-
-        return false;
-    }
-
-    LOGI(
-            "MS2130 Step 9: scanning for 1280x720 MJPEG @ 60 fps"
-    );
-
-    bool foundVsAlt0 = false;
-    bool currentFormatIsMjpeg = false;
-    uint8_t currentFormatIndex = 0;
-    UvcStreamMode candidate{};
-
-    for (uint8_t i = 0;
-         i < config->bNumInterfaces;
-         ++i) {
-
-        const libusb_interface& iface =
-                config->interface[i];
-
-        for (int a = 0;
-             a < iface.num_altsetting;
-             ++a) {
-
-            const libusb_interface_descriptor& alt =
-                    iface.altsetting[a];
-
-            if (alt.bInterfaceNumber != UVC_VIDEO_STREAMING_INTERFACE ||
-                alt.bAlternateSetting != 0 ||
-                alt.bInterfaceClass != LIBUSB_CLASS_VIDEO ||
-                alt.bInterfaceSubClass != 2) {
-
-                continue;
-            }
-
-            foundVsAlt0 = true;
-
-            const unsigned char* d = alt.extra;
-            int remaining = alt.extra_length;
-
-            while (d != nullptr && remaining >= 3) {
-
-                const uint8_t length = d[0];
-
-                if (length < 3 || length > remaining) {
-
-                    LOGE(
-                            "MS2130 Step 9: malformed VS descriptor "
-                            "length=%u remaining=%d",
-                            length,
-                            remaining
-                    );
-
-                    libusb_free_config_descriptor(config);
-                    return false;
-                }
-
-                const uint8_t descriptorType = d[1];
-                const uint8_t descriptorSubtype = d[2];
-
-                if (descriptorType == 0x24) {
-
-                    switch (descriptorSubtype) {
-
-                        case 0x04:  // VS_FORMAT_UNCOMPRESSED
-                            currentFormatIsMjpeg = false;
-                            break;
-
-                        case 0x06:  // VS_FORMAT_MJPEG
-                        {
-                            if (length < 11) {
-
-                                LOGE(
-                                        "MS2130 Step 9: short VS_FORMAT_MJPEG len=%u",
-                                        length
-                                );
-
-                                libusb_free_config_descriptor(config);
-                                return false;
-                            }
-
-                            currentFormatIsMjpeg = true;
-                            currentFormatIndex = d[3];
-
-                            LOGI(
-                                    "  MS2130 VS_FORMAT_MJPEG: "
-                                    "formatIndex=%u frames=%u defaultFrameIndex=%u",
-                                    currentFormatIndex,
-                                    d[4],
-                                    d[6]
-                            );
-
-                            break;
-                        }
-
-                        case 0x07:  // VS_FRAME_MJPEG
-                        {
-                            if (!currentFormatIsMjpeg) {
-                                break;
-                            }
-
-                            if (length < 26) {
-
-                                LOGE(
-                                        "MS2130 Step 9: short VS_FRAME_MJPEG len=%u",
-                                        length
-                                );
-
-                                libusb_free_config_descriptor(config);
-                                return false;
-                            }
-
-                            const uint8_t frameIndex = d[3];
-                            const uint16_t width = readLe16(d + 5);
-                            const uint16_t height = readLe16(d + 7);
-                            const uint32_t maxFrameBufferSize = readLe32(d + 17);
-                            const uint32_t defaultInterval = readLe32(d + 21);
-                            const uint8_t intervalType = d[25];
-
-                            LOGI(
-                                    "    MS2130 VS_FRAME_MJPEG: "
-                                    "formatIndex=%u frameIndex=%u %ux%u "
-                                    "maxFrame=%u defaultInterval=%u (%.3f fps) "
-                                    "intervalType=%u",
-                                    currentFormatIndex,
-                                    frameIndex,
-                                    width,
-                                    height,
-                                    maxFrameBufferSize,
-                                    defaultInterval,
-                                    interval100nsToFps(defaultInterval),
-                                    intervalType
-                            );
-
-                            if (width == TARGET_WIDTH &&
-                                height == TARGET_HEIGHT) {
-
-                                uint32_t selectedInterval = 0;
-
-                                if (chooseMjpeg60FpsInterval(
-                                        d,
-                                        length,
-                                        intervalType,
-                                        selectedInterval)) {
-
-                                    candidate.valid = true;
-                                    candidate.formatIndex = currentFormatIndex;
-                                    candidate.frameIndex = frameIndex;
-                                    candidate.width = width;
-                                    candidate.height = height;
-                                    candidate.frameInterval100ns = selectedInterval;
-                                    candidate.maxVideoFrameBufferSize =
-                                            maxFrameBufferSize;
-                                    candidate.bitsPerPixel = 0;
-
-                                    LOGI(
-                                            "    >>> MS2130 TARGET MATCH: "
-                                            "formatIndex=%u frameIndex=%u "
-                                            "1280x720 MJPEG interval=%u (%.3f fps) "
-                                            "maxFrame=%u",
-                                            candidate.formatIndex,
-                                            candidate.frameIndex,
-                                            candidate.frameInterval100ns,
-                                            interval100nsToFps(
-                                                    candidate.frameInterval100ns
-                                            ),
-                                            candidate.maxVideoFrameBufferSize
-                                    );
-                                }
-                            }
-
-                            break;
-                        }
-
-                        default:
-                            break;
-                    }
-                }
-
-                d += length;
-                remaining -= length;
-            }
-        }
-    }
-
-    libusb_free_config_descriptor(config);
-
-    if (!foundVsAlt0) {
-        LOGE("MS2130 Step 9: VideoStreaming IF1 ALT0 not found");
-        return false;
-    }
-
-    if (!candidate.valid) {
-
-        LOGE(
-                "MS2130 Step 9: target 1280x720 MJPEG @ 60 fps "
-                "not advertised"
-        );
-
-        return false;
-    }
-
-    selectedMode = candidate;
-
-    LOGI(
-            "MS2130 Step 9 selected: format=%u frame=%u "
-            "1280x720 MJPEG interval=%u (%.3f fps) maxFrame=%u",
-            selectedMode.formatIndex,
-            selectedMode.frameIndex,
             selectedMode.frameInterval100ns,
             interval100nsToFps(selectedMode.frameInterval100ns),
             selectedMode.maxVideoFrameBufferSize
@@ -1991,7 +1356,7 @@ static bool negotiateAndCommitStream(
 
     // Preserve current device defaults when GET_CUR(PROBE) works.
     // If it does not, a zero-initialized UVC control block is still
-    // sufficient for the explicit uncompressed format/frame request below.
+    // sufficient because format/frame/interval/maxFrame are set explicitly.
     const bool gotSeed =
             getStreamControl(
                     UVC_GET_CUR,
@@ -2044,11 +1409,22 @@ static bool negotiateAndCommitStream(
             mode.frameInterval100ns
     );
 
+    const uint32_t requestedMaxFrame =
+            mode.maxVideoFrameBufferSize;
+
+    if (requestedMaxFrame == 0) {
+
+        LOGE(
+                "Step 10: %s maxFrame is unavailable",
+                uvcVideoFormatName(mode.format)
+        );
+
+        return false;
+    }
+
     writeLe32(
             probe.data() + 18,
-            mode.maxVideoFrameBufferSize != 0
-            ? mode.maxVideoFrameBufferSize
-            : TARGET_YUYV_FRAME_BYTES
+            requestedMaxFrame
     );
 
     const uint32_t seedPayload =
@@ -2160,9 +1536,7 @@ static bool negotiateAndCommitStream(
         );
 
         result.maxVideoFrameSize =
-                mode.maxVideoFrameBufferSize != 0
-                ? mode.maxVideoFrameBufferSize
-                : TARGET_YUYV_FRAME_BYTES;
+                requestedMaxFrame;
 
         writeLe32(
                 negotiated.data() + 18,
@@ -2188,14 +1562,11 @@ static bool negotiateAndCommitStream(
         );
     }
 
-    if (result.maxVideoFrameSize <
-            TARGET_YUYV_FRAME_BYTES) {
+    if (result.maxVideoFrameSize < 4) {
 
         LOGE(
-                "Step 10: negotiated "
-                "maxFrame too small: %u < %u",
-                result.maxVideoFrameSize,
-                TARGET_YUYV_FRAME_BYTES
+                "Step 10: negotiated MJPEG maxFrame is invalid: %u",
+                result.maxVideoFrameSize
         );
 
         return false;
@@ -2225,11 +1596,12 @@ static bool negotiateAndCommitStream(
 
     LOGI(
             "Step 10: COMMIT OK "
-            "format=%u frame=%u "
+            "format=%u frame=%u %s "
             "interval=%u maxFrame=%u "
             "maxPayload=%u",
             result.formatIndex,
             result.frameIndex,
+            uvcVideoFormatName(mode.format),
             result.frameInterval100ns,
             result.maxVideoFrameSize,
             result.maxPayloadTransferSize
@@ -2242,7 +1614,7 @@ static bool negotiateAndCommitStream(
 }
 
 
-static bool negotiateAndCommitMs2130MjpegBulk(
+static bool negotiateAndCommitMjpegBulk(
         const UvcStreamMode& mode)
 {
     uint16_t controlLength = 0;
@@ -2258,16 +1630,16 @@ static bool negotiateAndCommitMs2130MjpegBulk(
                     UVC_GET_CUR,
                     UVC_VS_PROBE_CONTROL,
                     probe,
-                    "MS2130 GET_CUR(PROBE seed)"
+                    "MJPEG BULK GET_CUR(PROBE seed)"
             );
 
     if (gotSeed) {
-        logProbe("MS2130 seed PROBE", probe);
+        logProbe("MJPEG BULK seed PROBE", probe);
     }
     else {
 
         LOGI(
-                "MS2130 Step 10: GET_CUR(PROBE seed) unavailable; "
+                "MJPEG BULK Step 10: GET_CUR(PROBE seed) unavailable; "
                 "using zero-initialized control block"
         );
 
@@ -2293,17 +1665,17 @@ static bool negotiateAndCommitMs2130MjpegBulk(
             readLe32(probe.data() + 22);
 
     LOGI(
-            "MS2130 Step 10: BULK seed maxPayload=%u; "
+            "MJPEG BULK Step 10: BULK seed maxPayload=%u; "
             "not applying MS2109 alt3/3072-byte clamp",
             seedPayload
     );
 
-    logProbe("MS2130 requested PROBE", probe);
+    logProbe("MJPEG BULK requested PROBE", probe);
 
     if (!setStreamControl(
             UVC_VS_PROBE_CONTROL,
             probe,
-            "MS2130 SET_CUR(PROBE)")) {
+            "MJPEG BULK SET_CUR(PROBE)")) {
 
         return false;
     }
@@ -2314,12 +1686,12 @@ static bool negotiateAndCommitMs2130MjpegBulk(
             UVC_GET_CUR,
             UVC_VS_PROBE_CONTROL,
             negotiated,
-            "MS2130 GET_CUR(PROBE)")) {
+            "MJPEG BULK GET_CUR(PROBE)")) {
 
         return false;
     }
 
-    logProbe("MS2130 negotiated PROBE", negotiated);
+    logProbe("MJPEG BULK negotiated PROBE", negotiated);
 
     UvcProbeResult result = decodeProbe(negotiated);
 
@@ -2331,7 +1703,7 @@ static bool negotiateAndCommitMs2130MjpegBulk(
         result.frameIndex != mode.frameIndex) {
 
         LOGE(
-                "MS2130 Step 10: device changed mode "
+                "MJPEG BULK Step 10: device changed mode "
                 "wanted format=%u frame=%u got format=%u frame=%u",
                 mode.formatIndex,
                 mode.frameIndex,
@@ -2350,7 +1722,7 @@ static bool negotiateAndCommitMs2130MjpegBulk(
     if (intervalDiff > 1000) {
 
         LOGE(
-                "MS2130 Step 10: device changed frame interval "
+                "MJPEG BULK Step 10: device changed frame interval "
                 "wanted=%u got=%u",
                 mode.frameInterval100ns,
                 result.frameInterval100ns
@@ -2371,7 +1743,7 @@ static bool negotiateAndCommitMs2130MjpegBulk(
         );
 
         LOGI(
-                "MS2130 Step 10: maxFrame=0; "
+                "MJPEG BULK Step 10: maxFrame=0; "
                 "using descriptor fallback=%u",
                 result.maxVideoFrameSize
         );
@@ -2380,7 +1752,7 @@ static bool negotiateAndCommitMs2130MjpegBulk(
     if (result.maxPayloadTransferSize == 0) {
 
         LOGE(
-                "MS2130 Step 10: negotiated maxPayload=0; "
+                "MJPEG BULK Step 10: negotiated maxPayload=0; "
                 "refusing to invent a BULK payload size"
         );
 
@@ -2390,13 +1762,13 @@ static bool negotiateAndCommitMs2130MjpegBulk(
     if (!setStreamControl(
             UVC_VS_COMMIT_CONTROL,
             negotiated,
-            "MS2130 SET_CUR(COMMIT)")) {
+            "MJPEG BULK SET_CUR(COMMIT)")) {
 
         return false;
     }
 
     LOGI(
-            "MS2130 Step 10: COMMIT OK "
+            "MJPEG BULK Step 10: COMMIT OK "
             "format=%u frame=%u 1280x720 MJPEG "
             "interval=%u (%.3f fps) maxFrame=%u maxPayload=%u",
             result.formatIndex,
@@ -2409,223 +1781,6 @@ static bool negotiateAndCommitMs2130MjpegBulk(
 
     gProbeResult = result;
     return true;
-}
-
-
-static const char* jpegSubsamplingName(
-        uint8_t ySampling,
-        uint8_t cbSampling,
-        uint8_t crSampling)
-{
-    const uint8_t yH =
-            static_cast<uint8_t>(
-                    (ySampling >> 4) & 0x0f
-            );
-
-    const uint8_t yV =
-            static_cast<uint8_t>(
-                    ySampling & 0x0f
-            );
-
-    const uint8_t cbH =
-            static_cast<uint8_t>(
-                    (cbSampling >> 4) & 0x0f
-            );
-
-    const uint8_t cbV =
-            static_cast<uint8_t>(
-                    cbSampling & 0x0f
-            );
-
-    const uint8_t crH =
-            static_cast<uint8_t>(
-                    (crSampling >> 4) & 0x0f
-            );
-
-    const uint8_t crV =
-            static_cast<uint8_t>(
-                    crSampling & 0x0f
-            );
-
-    if (yH == 2 && yV == 2 &&
-        cbH == 1 && cbV == 1 &&
-        crH == 1 && crV == 1) {
-
-        return "YCbCr 4:2:0";
-    }
-
-    if (yH == 2 && yV == 1 &&
-        cbH == 1 && cbV == 1 &&
-        crH == 1 && crV == 1) {
-
-        return "YCbCr 4:2:2";
-    }
-
-    if (yH == 1 && yV == 1 &&
-        cbH == 1 && cbV == 1 &&
-        crH == 1 && crV == 1) {
-
-        return "YCbCr 4:4:4";
-    }
-
-    return "unknown/custom sampling";
-}
-
-
-static void logJpegSampling(
-        const std::vector<unsigned char>& jpeg)
-{
-    if (jpeg.size() < 4 ||
-        jpeg[0] != 0xff ||
-        jpeg[1] != 0xd8) {
-
-        LOGE(
-                "MS2130 JPEG inspect: SOI not found"
-        );
-
-        return;
-    }
-
-    size_t offset = 2;
-
-    while (offset + 4 <= jpeg.size()) {
-
-        if (jpeg[offset] != 0xff) {
-            ++offset;
-            continue;
-        }
-
-        while (offset < jpeg.size() &&
-               jpeg[offset] == 0xff) {
-            ++offset;
-        }
-
-        if (offset >= jpeg.size()) {
-            break;
-        }
-
-        const uint8_t marker =
-                jpeg[offset++];
-
-        if (marker == 0xd9 ||
-            marker == 0xda) {
-            break;
-        }
-
-        if (marker == 0x01 ||
-            (marker >= 0xd0 && marker <= 0xd7)) {
-            continue;
-        }
-
-        if (offset + 2 > jpeg.size()) {
-            break;
-        }
-
-        const uint16_t segmentLength =
-                static_cast<uint16_t>(
-                        (static_cast<uint16_t>(
-                                jpeg[offset]
-                         ) << 8) |
-                        jpeg[offset + 1]
-                );
-
-        if (segmentLength < 2 ||
-            offset + segmentLength > jpeg.size()) {
-
-            LOGE(
-                    "MS2130 JPEG inspect: malformed marker "
-                    "0xFF%02X length=%u",
-                    marker,
-                    segmentLength
-            );
-
-            return;
-        }
-
-        const bool isSof =
-                marker == 0xc0 || marker == 0xc1 ||
-                marker == 0xc2 || marker == 0xc3 ||
-                marker == 0xc5 || marker == 0xc6 ||
-                marker == 0xc7 || marker == 0xc9 ||
-                marker == 0xca || marker == 0xcb ||
-                marker == 0xcd || marker == 0xce ||
-                marker == 0xcf;
-
-        if (isSof &&
-            segmentLength >= 11) {
-
-            const size_t data =
-                    offset + 2;
-
-            const uint16_t height =
-                    static_cast<uint16_t>(
-                            (static_cast<uint16_t>(
-                                    jpeg[data + 1]
-                             ) << 8) |
-                            jpeg[data + 2]
-                    );
-
-            const uint16_t width =
-                    static_cast<uint16_t>(
-                            (static_cast<uint16_t>(
-                                    jpeg[data + 3]
-                             ) << 8) |
-                            jpeg[data + 4]
-                    );
-
-            const uint8_t components =
-                    jpeg[data + 5];
-
-            LOGI(
-                    "MS2130 JPEG SOF: marker=0xFF%02X "
-                    "%ux%u precision=%u components=%u",
-                    marker,
-                    width,
-                    height,
-                    jpeg[data],
-                    components
-            );
-
-            if (components >= 3 &&
-                data + 6 +
-                    static_cast<size_t>(components) * 3 <=
-                        offset + segmentLength) {
-
-                const uint8_t ySampling =
-                        jpeg[data + 7];
-
-                const uint8_t cbSampling =
-                        jpeg[data + 10];
-
-                const uint8_t crSampling =
-                        jpeg[data + 13];
-
-                LOGI(
-                        "MS2130 JPEG sampling: "
-                        "Y=%ux%u Cb=%ux%u Cr=%ux%u -> %s",
-                        (ySampling >> 4) & 0x0f,
-                        ySampling & 0x0f,
-                        (cbSampling >> 4) & 0x0f,
-                        cbSampling & 0x0f,
-                        (crSampling >> 4) & 0x0f,
-                        crSampling & 0x0f,
-                        jpegSubsamplingName(
-                                ySampling,
-                                cbSampling,
-                                crSampling
-                        )
-                );
-            }
-
-            return;
-        }
-
-        offset += segmentLength;
-    }
-
-    LOGE(
-            "MS2130 JPEG inspect: SOF marker not found"
-    );
 }
 
 
@@ -2768,11 +1923,12 @@ static Jpeg422ProbeResult probeJpeg422Sampling(
 
 
 // ------------------------------------------------------------
-// MS2130 Step 11.1 diagnostic:
-//   continuous asynchronous BULK reception for 1280x720 MJPEG60.
+// MJPEG BULK transport:
+//   continuous asynchronous BULK reception for required 1280x720 MJPEG60.
 //
-// This is intentionally a diagnostics-only backend. It does not decode
-// or publish JPEG frames to the renderer yet. The measurements here are:
+// This transport feeds each UVC payload into the shared MJPEG decoder,
+// which publishes planar YCbCr 4:2:2 frames to the common renderer.
+// Transport measurements retained here are:
 //
 //   wireFrameMs:
 //     host-observed time from the callback containing JPEG SOI to the
@@ -2783,11 +1939,11 @@ static Jpeg422ProbeResult probeJpeg422Sampling(
 //
 // These are useful for proving sustained 60 fps and USB delivery jitter.
 // They are NOT HDMI-input-to-display latency because the time spent inside
-// the MS2130 before the first USB payload is not visible to the host.
+// the capture device before the first USB payload is not visible to the host.
 // ------------------------------------------------------------
 
-static constexpr int MS2130_BULK_ASYNC_TRANSFER_COUNT = 8;
-static constexpr int MS2130_BULK_EVENT_TIMEOUT_US = 50'000;
+static constexpr int MJPEG_BULK_ASYNC_TRANSFER_COUNT = 8;
+static constexpr int MJPEG_BULK_EVENT_TIMEOUT_US = 50'000;
 
 static constexpr uint8_t UVC_STREAM_FID = 0x01;
 static constexpr uint8_t UVC_STREAM_EOF = 0x02;
@@ -2795,12 +1951,12 @@ static constexpr uint8_t UVC_STREAM_PTS = 0x04;
 static constexpr uint8_t UVC_STREAM_SCR = 0x08;
 static constexpr uint8_t UVC_STREAM_ERR = 0x40;
 
-struct Ms2130BulkTransferSlot {
+struct MjpegBulkTransferSlot {
     libusb_transfer* transfer = nullptr;
     std::vector<unsigned char> buffer;
 };
 
-struct Ms2130BulkFrameState {
+struct MjpegBulkFrameState {
     bool active = false;
     bool bad = false;
     bool sawEoi = false;
@@ -2815,7 +1971,7 @@ struct Ms2130BulkFrameState {
     uint64_t firstPayloadNs = 0;
 };
 
-struct Ms2130BulkStats {
+struct MjpegBulkStats {
     uint64_t transfersCompleted = 0;
     uint64_t transfersFailed = 0;
     uint64_t submitErrors = 0;
@@ -2849,17 +2005,17 @@ struct Ms2130BulkStats {
     std::vector<double> frameIntervalMs;
 };
 
-static std::atomic<bool> gMs2130BulkRunning{false};
-static std::atomic<int> gMs2130BulkInflight{0};
+static std::atomic<bool> gMjpegBulkRunning{false};
+static std::atomic<int> gMjpegBulkInflight{0};
 
-static std::thread gMs2130BulkEventThread;
-static std::vector<Ms2130BulkTransferSlot> gMs2130BulkTransfers;
+static std::thread gMjpegBulkEventThread;
+static std::vector<MjpegBulkTransferSlot> gMjpegBulkTransfers;
 
-static Ms2130BulkFrameState gMs2130BulkFrame;
-static Ms2130BulkStats gMs2130BulkStats;
+static MjpegBulkFrameState gMjpegBulkFrame;
+static MjpegBulkStats gMjpegBulkStats;
 
-static uint32_t gMs2130BulkMaxFrame = 0;
-static bool gMs2130BulkHeaderLogged = false;
+static uint32_t gMjpegBulkMaxFrame = 0;
+static bool gMjpegBulkHeaderLogged = false;
 
 // One-shot JPEG SOF sampling validation.  The transport is accepted only
 // when the first complete MJPEG frame reports conventional JPEG 4:2:2:
@@ -2907,21 +2063,21 @@ static double percentileSample(
 }
 
 
-static void resetMs2130BulkFrame()
+static void resetMjpegBulkFrame()
 {
-    gMs2130BulkFrame = {};
+    gMjpegBulkFrame = {};
 }
 
 
-static void maybeLogMs2130BulkStats(uint64_t nowNs)
+static void maybeLogMjpegBulkStats(uint64_t nowNs)
 {
-    if (gMs2130BulkStats.lastLogNs == 0) {
-        gMs2130BulkStats.lastLogNs = nowNs;
+    if (gMjpegBulkStats.lastLogNs == 0) {
+        gMjpegBulkStats.lastLogNs = nowNs;
         return;
     }
 
     const uint64_t elapsedNs =
-            nowNs - gMs2130BulkStats.lastLogNs;
+            nowNs - gMjpegBulkStats.lastLogNs;
 
     if (elapsedNs < 1'000'000'000ULL) {
         return;
@@ -2932,28 +2088,28 @@ static void maybeLogMs2130BulkStats(uint64_t nowNs)
             1'000'000'000.0;
 
     const uint64_t frameDelta =
-            gMs2130BulkStats.goodFrames -
-            gMs2130BulkStats.lastGoodFrames;
+            gMjpegBulkStats.goodFrames -
+            gMjpegBulkStats.lastGoodFrames;
 
     const uint64_t usbDelta =
-            gMs2130BulkStats.usbBytes -
-            gMs2130BulkStats.lastUsbBytes;
+            gMjpegBulkStats.usbBytes -
+            gMjpegBulkStats.lastUsbBytes;
 
     const uint64_t videoDelta =
-            gMs2130BulkStats.videoBytes -
-            gMs2130BulkStats.lastVideoBytes;
+            gMjpegBulkStats.videoBytes -
+            gMjpegBulkStats.lastVideoBytes;
 
     const uint64_t dropDelta =
-            gMs2130BulkStats.droppedFrames -
-            gMs2130BulkStats.lastDroppedFrames;
+            gMjpegBulkStats.droppedFrames -
+            gMjpegBulkStats.lastDroppedFrames;
 
     const uint64_t malformedDelta =
-            gMs2130BulkStats.malformedHeaders -
-            gMs2130BulkStats.lastMalformedHeaders;
+            gMjpegBulkStats.malformedHeaders -
+            gMjpegBulkStats.lastMalformedHeaders;
 
     const uint64_t uvcErrorDelta =
-            gMs2130BulkStats.uvcErrors -
-            gMs2130BulkStats.lastUvcErrors;
+            gMjpegBulkStats.uvcErrors -
+            gMjpegBulkStats.lastUvcErrors;
 
     const double fps =
             static_cast<double>(frameDelta) /
@@ -2972,50 +2128,50 @@ static void maybeLogMs2130BulkStats(uint64_t nowNs)
     const double frameBytesAvg =
             frameDelta != 0
             ? static_cast<double>(
-                    gMs2130BulkStats.windowFrameBytesSum
+                    gMjpegBulkStats.windowFrameBytesSum
               ) / static_cast<double>(frameDelta)
             : 0.0;
 
     const size_t frameBytesMin =
             frameDelta != 0
-            ? gMs2130BulkStats.windowFrameBytesMin
+            ? gMjpegBulkStats.windowFrameBytesMin
             : 0;
 
     const size_t frameBytesMax =
             frameDelta != 0
-            ? gMs2130BulkStats.windowFrameBytesMax
+            ? gMjpegBulkStats.windowFrameBytesMax
             : 0;
 
     const double wireAvg =
-            !gMs2130BulkStats.wireFrameMs.empty()
+            !gMjpegBulkStats.wireFrameMs.empty()
             ? [&]() {
                 double sum = 0.0;
-                for (double v : gMs2130BulkStats.wireFrameMs) {
+                for (double v : gMjpegBulkStats.wireFrameMs) {
                     sum += v;
                 }
                 return sum /
                         static_cast<double>(
-                                gMs2130BulkStats.wireFrameMs.size()
+                                gMjpegBulkStats.wireFrameMs.size()
                         );
               }()
             : 0.0;
 
     const double intervalAvg =
-            !gMs2130BulkStats.frameIntervalMs.empty()
+            !gMjpegBulkStats.frameIntervalMs.empty()
             ? [&]() {
                 double sum = 0.0;
-                for (double v : gMs2130BulkStats.frameIntervalMs) {
+                for (double v : gMjpegBulkStats.frameIntervalMs) {
                     sum += v;
                 }
                 return sum /
                         static_cast<double>(
-                                gMs2130BulkStats.frameIntervalMs.size()
+                                gMjpegBulkStats.frameIntervalMs.size()
                         );
               }()
             : 0.0;
 
     LOGI(
-            "MS2130 BULK stats: fps=%.2f usb=%.2f MiB/s video=%.2f MiB/s "
+            "MJPEG BULK stats: fps=%.2f usb=%.2f MiB/s video=%.2f MiB/s "
             "jpegBytes avg=%.0f min=%zu max=%zu "
             "wireFrameMs avg=%.3f p50=%.3f p95=%.3f max=%.3f "
             "frameIntervalMs avg=%.3f p50=%.3f p95=%.3f max=%.3f "
@@ -3028,44 +2184,44 @@ static void maybeLogMs2130BulkStats(uint64_t nowNs)
             frameBytesMin,
             frameBytesMax,
             wireAvg,
-            percentileSample(gMs2130BulkStats.wireFrameMs, 0.50),
-            percentileSample(gMs2130BulkStats.wireFrameMs, 0.95),
-            percentileSample(gMs2130BulkStats.wireFrameMs, 1.00),
+            percentileSample(gMjpegBulkStats.wireFrameMs, 0.50),
+            percentileSample(gMjpegBulkStats.wireFrameMs, 0.95),
+            percentileSample(gMjpegBulkStats.wireFrameMs, 1.00),
             intervalAvg,
-            percentileSample(gMs2130BulkStats.frameIntervalMs, 0.50),
-            percentileSample(gMs2130BulkStats.frameIntervalMs, 0.95),
-            percentileSample(gMs2130BulkStats.frameIntervalMs, 1.00),
+            percentileSample(gMjpegBulkStats.frameIntervalMs, 0.50),
+            percentileSample(gMjpegBulkStats.frameIntervalMs, 0.95),
+            percentileSample(gMjpegBulkStats.frameIntervalMs, 1.00),
             static_cast<unsigned long long>(dropDelta),
             static_cast<unsigned long long>(malformedDelta),
             static_cast<unsigned long long>(uvcErrorDelta),
-            static_cast<unsigned long long>(gMs2130BulkStats.goodFrames),
-            gMs2130BulkInflight.load(std::memory_order_acquire)
+            static_cast<unsigned long long>(gMjpegBulkStats.goodFrames),
+            gMjpegBulkInflight.load(std::memory_order_acquire)
     );
 
-    gMs2130BulkStats.lastLogNs = nowNs;
-    gMs2130BulkStats.lastGoodFrames =
-            gMs2130BulkStats.goodFrames;
-    gMs2130BulkStats.lastUsbBytes =
-            gMs2130BulkStats.usbBytes;
-    gMs2130BulkStats.lastVideoBytes =
-            gMs2130BulkStats.videoBytes;
-    gMs2130BulkStats.lastDroppedFrames =
-            gMs2130BulkStats.droppedFrames;
-    gMs2130BulkStats.lastMalformedHeaders =
-            gMs2130BulkStats.malformedHeaders;
-    gMs2130BulkStats.lastUvcErrors =
-            gMs2130BulkStats.uvcErrors;
+    gMjpegBulkStats.lastLogNs = nowNs;
+    gMjpegBulkStats.lastGoodFrames =
+            gMjpegBulkStats.goodFrames;
+    gMjpegBulkStats.lastUsbBytes =
+            gMjpegBulkStats.usbBytes;
+    gMjpegBulkStats.lastVideoBytes =
+            gMjpegBulkStats.videoBytes;
+    gMjpegBulkStats.lastDroppedFrames =
+            gMjpegBulkStats.droppedFrames;
+    gMjpegBulkStats.lastMalformedHeaders =
+            gMjpegBulkStats.malformedHeaders;
+    gMjpegBulkStats.lastUvcErrors =
+            gMjpegBulkStats.uvcErrors;
 
-    gMs2130BulkStats.windowFrameBytesSum = 0;
-    gMs2130BulkStats.windowFrameBytesMin =
+    gMjpegBulkStats.windowFrameBytesSum = 0;
+    gMjpegBulkStats.windowFrameBytesMin =
             std::numeric_limits<size_t>::max();
-    gMs2130BulkStats.windowFrameBytesMax = 0;
-    gMs2130BulkStats.wireFrameMs.clear();
-    gMs2130BulkStats.frameIntervalMs.clear();
+    gMjpegBulkStats.windowFrameBytesMax = 0;
+    gMjpegBulkStats.wireFrameMs.clear();
+    gMjpegBulkStats.frameIntervalMs.clear();
 }
 
 
-static void processMs2130BulkPayload(
+static void processMjpegBulkPayload(
         const unsigned char* data,
         int length,
         uint64_t callbackNs)
@@ -3074,19 +2230,19 @@ static void processMs2130BulkPayload(
         return;
     }
 
-    // Decode diagnostic runs on its own latest-pending worker. Feeding it
-    // here leaves the existing transport timing/statistics path unchanged.
-    ms2130_jpeg_decode_diag::processPayload(
+    // The shared decoder owns JPEG assembly/decode/latest-frame publication.
+    // Feeding it here leaves BULK transport timing/statistics independent.
+    uvc_mjpeg_decoder::processPayload(
             data,
             length,
             callbackNs
     );
 
-    gMs2130BulkStats.usbBytes +=
+    gMjpegBulkStats.usbBytes +=
             static_cast<uint64_t>(length);
 
     if (length < 2) {
-        ++gMs2130BulkStats.malformedHeaders;
+        ++gMjpegBulkStats.malformedHeaders;
         return;
     }
 
@@ -3096,14 +2252,14 @@ static void processMs2130BulkPayload(
     if (headerLength < 2 ||
         static_cast<int>(headerLength) > length) {
 
-        ++gMs2130BulkStats.malformedHeaders;
-        gMs2130BulkFrame.bad = true;
+        ++gMjpegBulkStats.malformedHeaders;
+        gMjpegBulkFrame.bad = true;
         return;
     }
 
-    if (!gMs2130BulkHeaderLogged) {
+    if (!gMjpegBulkHeaderLogged) {
         LOGI(
-                "MS2130 BULK header: length=%u flags=0x%02X "
+                "MJPEG BULK header: length=%u flags=0x%02X "
                 "PTS=%s SCR=%s",
                 headerLength,
                 flags,
@@ -3115,15 +2271,15 @@ static void processMs2130BulkPayload(
             headerLength >= 6) {
 
             LOGI(
-                    "MS2130 BULK header: first PTS=%u",
+                    "MJPEG BULK header: first PTS=%u",
                     readLe32(data + 2)
             );
         }
 
-        gMs2130BulkHeaderLogged = true;
+        gMjpegBulkHeaderLogged = true;
     }
 
-    ++gMs2130BulkStats.payloads;
+    ++gMjpegBulkStats.payloads;
 
     const uint8_t fid =
             (flags & UVC_STREAM_FID) ? 1 : 0;
@@ -3143,30 +2299,30 @@ static void processMs2130BulkPayload(
                     static_cast<int>(headerLength)
             );
 
-    gMs2130BulkStats.videoBytes +=
+    gMjpegBulkStats.videoBytes +=
             static_cast<uint64_t>(payloadBytes);
 
     if (payloadError) {
-        ++gMs2130BulkStats.uvcErrors;
+        ++gMjpegBulkStats.uvcErrors;
 
-        if (gMs2130BulkFrame.active) {
-            gMs2130BulkFrame.bad = true;
+        if (gMjpegBulkFrame.active) {
+            gMjpegBulkFrame.bad = true;
         }
 
         return;
     }
 
-    if (gMs2130BulkFrame.active &&
-        fid != gMs2130BulkFrame.fid) {
+    if (gMjpegBulkFrame.active &&
+        fid != gMjpegBulkFrame.fid) {
 
-        ++gMs2130BulkStats.fidResyncs;
-        ++gMs2130BulkStats.droppedFrames;
-        resetMs2130BulkFrame();
+        ++gMjpegBulkStats.fidResyncs;
+        ++gMjpegBulkStats.droppedFrames;
+        resetMjpegBulkFrame();
     }
 
     size_t payloadOffset = 0;
 
-    if (!gMs2130BulkFrame.active &&
+    if (!gMjpegBulkFrame.active &&
         payloadBytes > 0) {
 
         bool foundSoi = false;
@@ -3185,9 +2341,9 @@ static void processMs2130BulkPayload(
         }
 
         if (foundSoi) {
-            gMs2130BulkFrame.active = true;
-            gMs2130BulkFrame.fid = fid;
-            gMs2130BulkFrame.firstPayloadNs = callbackNs;
+            gMjpegBulkFrame.active = true;
+            gMjpegBulkFrame.fid = fid;
+            gMjpegBulkFrame.firstPayloadNs = callbackNs;
 
             if (!gBulkJpeg422Checked.load(std::memory_order_acquire)) {
                 gBulkJpegHeaderProbe.clear();
@@ -3195,11 +2351,11 @@ static void processMs2130BulkPayload(
         }
     }
 
-    if (!gMs2130BulkFrame.active) {
+    if (!gMjpegBulkFrame.active) {
         return;
     }
 
-    ++gMs2130BulkFrame.payloads;
+    ++gMjpegBulkFrame.payloads;
 
     if (!gBulkJpeg422Checked.load(std::memory_order_acquire) &&
         payloadOffset < payloadBytes) {
@@ -3248,26 +2404,26 @@ static void processMs2130BulkPayload(
 
         const unsigned char value = payload[i];
 
-        if (gMs2130BulkFrame.lastByteValid &&
-            gMs2130BulkFrame.lastByte == 0xff &&
+        if (gMjpegBulkFrame.lastByteValid &&
+            gMjpegBulkFrame.lastByte == 0xff &&
             value == 0xd9) {
 
-            gMs2130BulkFrame.sawEoi = true;
+            gMjpegBulkFrame.sawEoi = true;
         }
 
-        gMs2130BulkFrame.lastByte = value;
-        gMs2130BulkFrame.lastByteValid = true;
+        gMjpegBulkFrame.lastByte = value;
+        gMjpegBulkFrame.lastByteValid = true;
     }
 
-    gMs2130BulkFrame.bytes +=
+    gMjpegBulkFrame.bytes +=
             payloadBytes - payloadOffset;
 
-    if (gMs2130BulkFrame.bytes >
-        static_cast<size_t>(gMs2130BulkMaxFrame)) {
+    if (gMjpegBulkFrame.bytes >
+        static_cast<size_t>(gMjpegBulkMaxFrame)) {
 
-        ++gMs2130BulkStats.overflowFrames;
-        ++gMs2130BulkStats.droppedFrames;
-        resetMs2130BulkFrame();
+        ++gMjpegBulkStats.overflowFrames;
+        ++gMjpegBulkStats.droppedFrames;
+        resetMjpegBulkFrame();
         return;
     }
 
@@ -3276,13 +2432,13 @@ static void processMs2130BulkPayload(
     }
 
     const bool frameOk =
-            !gMs2130BulkFrame.bad &&
-            gMs2130BulkFrame.sawEoi &&
-            gMs2130BulkFrame.bytes >= 4;
+            !gMjpegBulkFrame.bad &&
+            gMjpegBulkFrame.sawEoi &&
+            gMjpegBulkFrame.bytes >= 4;
 
     if (!frameOk) {
-        ++gMs2130BulkStats.droppedFrames;
-        resetMs2130BulkFrame();
+        ++gMjpegBulkStats.droppedFrames;
+        resetMjpegBulkFrame();
         return;
     }
 
@@ -3298,74 +2454,74 @@ static void processMs2130BulkPayload(
     const double wireFrameMs =
             static_cast<double>(
                     callbackNs -
-                    gMs2130BulkFrame.firstPayloadNs
+                    gMjpegBulkFrame.firstPayloadNs
             ) /
             1'000'000.0;
 
-    ++gMs2130BulkStats.goodFrames;
+    ++gMjpegBulkStats.goodFrames;
 
-    gMs2130BulkStats.windowFrameBytesSum +=
+    gMjpegBulkStats.windowFrameBytesSum +=
             static_cast<uint64_t>(
-                    gMs2130BulkFrame.bytes
+                    gMjpegBulkFrame.bytes
             );
 
-    gMs2130BulkStats.windowFrameBytesMin =
+    gMjpegBulkStats.windowFrameBytesMin =
             std::min(
-                    gMs2130BulkStats.windowFrameBytesMin,
-                    gMs2130BulkFrame.bytes
+                    gMjpegBulkStats.windowFrameBytesMin,
+                    gMjpegBulkFrame.bytes
             );
 
-    gMs2130BulkStats.windowFrameBytesMax =
+    gMjpegBulkStats.windowFrameBytesMax =
             std::max(
-                    gMs2130BulkStats.windowFrameBytesMax,
-                    gMs2130BulkFrame.bytes
+                    gMjpegBulkStats.windowFrameBytesMax,
+                    gMjpegBulkFrame.bytes
             );
 
-    gMs2130BulkStats.wireFrameMs.push_back(
+    gMjpegBulkStats.wireFrameMs.push_back(
             wireFrameMs
     );
 
-    if (gMs2130BulkStats.lastGoodEofNs != 0) {
+    if (gMjpegBulkStats.lastGoodEofNs != 0) {
 
-        gMs2130BulkStats.frameIntervalMs.push_back(
+        gMjpegBulkStats.frameIntervalMs.push_back(
                 static_cast<double>(
                         callbackNs -
-                        gMs2130BulkStats.lastGoodEofNs
+                        gMjpegBulkStats.lastGoodEofNs
                 ) /
                 1'000'000.0
         );
     }
 
-    gMs2130BulkStats.lastGoodEofNs =
+    gMjpegBulkStats.lastGoodEofNs =
             callbackNs;
 
-    if (gMs2130BulkStats.goodFrames <= 5) {
+    if (gMjpegBulkStats.goodFrames <= 5) {
 
         LOGI(
-                "MS2130 BULK FRAME #%llu: bytes=%zu payloads=%u "
+                "MJPEG BULK FRAME #%llu: bytes=%zu payloads=%u "
                 "fid=%u wireFrameMs=%.3f",
                 static_cast<unsigned long long>(
-                        gMs2130BulkStats.goodFrames
+                        gMjpegBulkStats.goodFrames
                 ),
-                gMs2130BulkFrame.bytes,
-                gMs2130BulkFrame.payloads,
-                gMs2130BulkFrame.fid,
+                gMjpegBulkFrame.bytes,
+                gMjpegBulkFrame.payloads,
+                gMjpegBulkFrame.fid,
                 wireFrameMs
         );
     }
 
-    resetMs2130BulkFrame();
+    resetMjpegBulkFrame();
 }
 
 
-static void LIBUSB_CALL onMs2130BulkTransfer(
+static void LIBUSB_CALL onMjpegBulkTransfer(
         libusb_transfer* transfer)
 {
     if (transfer == nullptr) {
         return;
     }
 
-    gMs2130BulkInflight.fetch_sub(
+    gMjpegBulkInflight.fetch_sub(
             1,
             std::memory_order_acq_rel
     );
@@ -3374,17 +2530,17 @@ static void LIBUSB_CALL onMs2130BulkTransfer(
             steadyNowNs();
 
     bool canResubmit =
-            gMs2130BulkRunning.load(
+            gMjpegBulkRunning.load(
                     std::memory_order_acquire
             );
 
     if (transfer->status ==
         LIBUSB_TRANSFER_COMPLETED) {
 
-        ++gMs2130BulkStats.transfersCompleted;
+        ++gMjpegBulkStats.transfersCompleted;
 
         if (transfer->actual_length > 0) {
-            processMs2130BulkPayload(
+            processMjpegBulkPayload(
                     transfer->buffer,
                     transfer->actual_length,
                     callbackNs
@@ -3394,10 +2550,10 @@ static void LIBUSB_CALL onMs2130BulkTransfer(
     else if (transfer->status !=
              LIBUSB_TRANSFER_CANCELLED) {
 
-        ++gMs2130BulkStats.transfersFailed;
+        ++gMjpegBulkStats.transfersFailed;
 
         LOGE(
-                "MS2130 BULK async transfer failed: status=%d actual=%d",
+                "MJPEG BULK async transfer failed: status=%d actual=%d",
                 transfer->status,
                 transfer->actual_length
         );
@@ -3405,7 +2561,7 @@ static void LIBUSB_CALL onMs2130BulkTransfer(
         if (transfer->status ==
                 LIBUSB_TRANSFER_NO_DEVICE) {
 
-            gMs2130BulkRunning.store(
+            gMjpegBulkRunning.store(
                     false,
                     std::memory_order_release
             );
@@ -3413,19 +2569,19 @@ static void LIBUSB_CALL onMs2130BulkTransfer(
         }
     }
 
-    maybeLogMs2130BulkStats(
+    maybeLogMjpegBulkStats(
             callbackNs
     );
 
     if (!canResubmit ||
-        !gMs2130BulkRunning.load(
+        !gMjpegBulkRunning.load(
                 std::memory_order_acquire
         )) {
 
         return;
     }
 
-    gMs2130BulkInflight.fetch_add(
+    gMjpegBulkInflight.fetch_add(
             1,
             std::memory_order_acq_rel
     );
@@ -3437,20 +2593,20 @@ static void LIBUSB_CALL onMs2130BulkTransfer(
 
     if (r != LIBUSB_SUCCESS) {
 
-        gMs2130BulkInflight.fetch_sub(
+        gMjpegBulkInflight.fetch_sub(
                 1,
                 std::memory_order_acq_rel
         );
 
-        ++gMs2130BulkStats.submitErrors;
+        ++gMjpegBulkStats.submitErrors;
 
         LOGE(
-                "MS2130 BULK async resubmit failed: %d (%s)",
+                "MJPEG BULK async resubmit failed: %d (%s)",
                 r,
                 libusb_error_name(r)
         );
 
-        gMs2130BulkRunning.store(
+        gMjpegBulkRunning.store(
                 false,
                 std::memory_order_release
         );
@@ -3458,28 +2614,28 @@ static void LIBUSB_CALL onMs2130BulkTransfer(
 }
 
 
-static void ms2130BulkEventLoop()
+static void mjpegBulkEventLoop()
 {
     LOGI(
-            "MS2130 BULK async event thread started"
+            "MJPEG BULK async event thread started"
     );
 
     bool cancellationIssued = false;
 
-    while (gMs2130BulkRunning.load(
+    while (gMjpegBulkRunning.load(
                std::memory_order_acquire
            ) ||
-           gMs2130BulkInflight.load(
+           gMjpegBulkInflight.load(
                std::memory_order_acquire
            ) > 0) {
 
-        if (!gMs2130BulkRunning.load(
+        if (!gMjpegBulkRunning.load(
                 std::memory_order_acquire
             ) &&
             !cancellationIssued) {
 
-            for (Ms2130BulkTransferSlot& slot :
-                 gMs2130BulkTransfers) {
+            for (MjpegBulkTransferSlot& slot :
+                 gMjpegBulkTransfers) {
 
                 if (slot.transfer != nullptr) {
                     libusb_cancel_transfer(
@@ -3494,7 +2650,7 @@ static void ms2130BulkEventLoop()
         timeval timeout{};
         timeout.tv_sec = 0;
         timeout.tv_usec =
-                MS2130_BULK_EVENT_TIMEOUT_US;
+                MJPEG_BULK_EVENT_TIMEOUT_US;
 
         const int r =
                 libusb_handle_events_timeout_completed(
@@ -3507,12 +2663,12 @@ static void ms2130BulkEventLoop()
             r != LIBUSB_ERROR_INTERRUPTED) {
 
             LOGE(
-                    "MS2130 BULK event loop failed: %d (%s)",
+                    "MJPEG BULK event loop failed: %d (%s)",
                     r,
                     libusb_error_name(r)
             );
 
-            gMs2130BulkRunning.store(
+            gMjpegBulkRunning.store(
                     false,
                     std::memory_order_release
             );
@@ -3520,40 +2676,40 @@ static void ms2130BulkEventLoop()
     }
 
     LOGI(
-            "MS2130 BULK async event thread stopped: "
+            "MJPEG BULK async event thread stopped: "
             "frames=%llu transfers=%llu failed=%llu submitErr=%llu "
             "drop=%llu malformed=%llu uvcErr=%llu fidResync=%llu overflow=%llu",
-            static_cast<unsigned long long>(gMs2130BulkStats.goodFrames),
-            static_cast<unsigned long long>(gMs2130BulkStats.transfersCompleted),
-            static_cast<unsigned long long>(gMs2130BulkStats.transfersFailed),
-            static_cast<unsigned long long>(gMs2130BulkStats.submitErrors),
-            static_cast<unsigned long long>(gMs2130BulkStats.droppedFrames),
-            static_cast<unsigned long long>(gMs2130BulkStats.malformedHeaders),
-            static_cast<unsigned long long>(gMs2130BulkStats.uvcErrors),
-            static_cast<unsigned long long>(gMs2130BulkStats.fidResyncs),
-            static_cast<unsigned long long>(gMs2130BulkStats.overflowFrames)
+            static_cast<unsigned long long>(gMjpegBulkStats.goodFrames),
+            static_cast<unsigned long long>(gMjpegBulkStats.transfersCompleted),
+            static_cast<unsigned long long>(gMjpegBulkStats.transfersFailed),
+            static_cast<unsigned long long>(gMjpegBulkStats.submitErrors),
+            static_cast<unsigned long long>(gMjpegBulkStats.droppedFrames),
+            static_cast<unsigned long long>(gMjpegBulkStats.malformedHeaders),
+            static_cast<unsigned long long>(gMjpegBulkStats.uvcErrors),
+            static_cast<unsigned long long>(gMjpegBulkStats.fidResyncs),
+            static_cast<unsigned long long>(gMjpegBulkStats.overflowFrames)
     );
 }
 
 
-static void stopMs2130AsyncBulkDiagnostic()
+static void stopMjpegAsyncBulkTransport()
 {
     const bool hadThread =
-            gMs2130BulkEventThread.joinable();
+            gMjpegBulkEventThread.joinable();
 
     if (!hadThread &&
-        gMs2130BulkTransfers.empty()) {
+        gMjpegBulkTransfers.empty()) {
 
         return;
     }
 
-    gMs2130BulkRunning.store(
+    gMjpegBulkRunning.store(
             false,
             std::memory_order_release
     );
 
-    for (Ms2130BulkTransferSlot& slot :
-         gMs2130BulkTransfers) {
+    for (MjpegBulkTransferSlot& slot :
+         gMjpegBulkTransfers) {
 
         if (slot.transfer != nullptr) {
             libusb_cancel_transfer(
@@ -3562,15 +2718,15 @@ static void stopMs2130AsyncBulkDiagnostic()
         }
     }
 
-    if (gMs2130BulkEventThread.joinable()) {
-        gMs2130BulkEventThread.join();
+    if (gMjpegBulkEventThread.joinable()) {
+        gMjpegBulkEventThread.join();
     }
 
     // No more BULK callbacks can arrive after the event thread is drained.
-    ms2130_jpeg_decode_diag::stop();
+    uvc_mjpeg_decoder::stop();
 
-    for (Ms2130BulkTransferSlot& slot :
-         gMs2130BulkTransfers) {
+    for (MjpegBulkTransferSlot& slot :
+         gMjpegBulkTransfers) {
 
         if (slot.transfer != nullptr) {
             libusb_free_transfer(
@@ -3580,16 +2736,16 @@ static void stopMs2130AsyncBulkDiagnostic()
         }
     }
 
-    gMs2130BulkTransfers.clear();
-    gMs2130BulkInflight.store(
+    gMjpegBulkTransfers.clear();
+    gMjpegBulkInflight.store(
             0,
             std::memory_order_release
     );
 
-    resetMs2130BulkFrame();
-    gMs2130BulkStats = {};
-    gMs2130BulkMaxFrame = 0;
-    gMs2130BulkHeaderLogged = false;
+    resetMjpegBulkFrame();
+    gMjpegBulkStats = {};
+    gMjpegBulkMaxFrame = 0;
+    gMjpegBulkHeaderLogged = false;
 
     gBulkJpeg422Checked.store(false, std::memory_order_release);
     gBulkJpeg422Ok.store(false, std::memory_order_release);
@@ -3597,13 +2753,13 @@ static void stopMs2130AsyncBulkDiagnostic()
 }
 
 
-static bool startMs2130AsyncBulkDiagnostic()
+static bool startMjpegAsyncBulkTransport()
 {
     if (gUsbContext == nullptr ||
         gUsbHandle == nullptr) {
 
         LOGE(
-                "MS2130 BULK async: USB context/handle is null"
+                "MJPEG BULK async: USB context/handle is null"
         );
 
         return false;
@@ -3623,7 +2779,7 @@ static bool startMs2130AsyncBulkDiagnostic()
             )) {
 
         LOGE(
-                "MS2130 BULK async: invalid negotiated limits "
+                "MJPEG BULK async: invalid negotiated limits "
                 "maxPayload=%u maxFrame=%u",
                 maxPayload,
                 maxFrame
@@ -3632,37 +2788,37 @@ static bool startMs2130AsyncBulkDiagnostic()
         return false;
     }
 
-    stopMs2130AsyncBulkDiagnostic();
+    stopMjpegAsyncBulkTransport();
 
-    if (!ms2130_jpeg_decode_diag::start(maxFrame)) {
+    if (!uvc_mjpeg_decoder::start(maxFrame)) {
         LOGE(
-                "MS2130 BULK async: JPEG decode diagnostic start failed"
+                "MJPEG BULK async: shared JPEG decoder start failed"
         );
         return false;
     }
 
-    gMs2130BulkMaxFrame = maxFrame;
-    gMs2130BulkHeaderLogged = false;
+    gMjpegBulkMaxFrame = maxFrame;
+    gMjpegBulkHeaderLogged = false;
 
     gBulkJpeg422Checked.store(false, std::memory_order_release);
     gBulkJpeg422Ok.store(false, std::memory_order_release);
     gBulkJpegHeaderProbe.clear();
     gBulkJpegHeaderProbe.reserve(4096);
 
-    resetMs2130BulkFrame();
-    gMs2130BulkStats = {};
-    gMs2130BulkStats.lastLogNs =
+    resetMjpegBulkFrame();
+    gMjpegBulkStats = {};
+    gMjpegBulkStats.lastLogNs =
             steadyNowNs();
 
-    gMs2130BulkStats.wireFrameMs.reserve(128);
-    gMs2130BulkStats.frameIntervalMs.reserve(128);
+    gMjpegBulkStats.wireFrameMs.reserve(128);
+    gMjpegBulkStats.frameIntervalMs.reserve(128);
 
-    gMs2130BulkTransfers.resize(
-            MS2130_BULK_ASYNC_TRANSFER_COUNT
+    gMjpegBulkTransfers.resize(
+            MJPEG_BULK_ASYNC_TRANSFER_COUNT
     );
 
-    for (Ms2130BulkTransferSlot& slot :
-         gMs2130BulkTransfers) {
+    for (MjpegBulkTransferSlot& slot :
+         gMjpegBulkTransfers) {
 
         slot.buffer.resize(
                 maxPayload
@@ -3674,10 +2830,10 @@ static bool startMs2130AsyncBulkDiagnostic()
         if (slot.transfer == nullptr) {
 
             LOGE(
-                    "MS2130 BULK async: libusb_alloc_transfer failed"
+                    "MJPEG BULK async: libusb_alloc_transfer failed"
             );
 
-            stopMs2130AsyncBulkDiagnostic();
+            stopMjpegAsyncBulkTransport();
             return false;
         }
 
@@ -3687,28 +2843,28 @@ static bool startMs2130AsyncBulkDiagnostic()
                 UVC_VIDEO_ENDPOINT,
                 slot.buffer.data(),
                 static_cast<int>(slot.buffer.size()),
-                onMs2130BulkTransfer,
+                onMjpegBulkTransfer,
                 &slot,
                 0
         );
     }
 
-    gMs2130BulkRunning.store(
+    gMjpegBulkRunning.store(
             true,
             std::memory_order_release
     );
 
-    gMs2130BulkEventThread =
+    gMjpegBulkEventThread =
             std::thread(
-                    ms2130BulkEventLoop
+                    mjpegBulkEventLoop
             );
 
     int submitted = 0;
 
-    for (Ms2130BulkTransferSlot& slot :
-         gMs2130BulkTransfers) {
+    for (MjpegBulkTransferSlot& slot :
+         gMjpegBulkTransfers) {
 
-        gMs2130BulkInflight.fetch_add(
+        gMjpegBulkInflight.fetch_add(
                 1,
                 std::memory_order_acq_rel
         );
@@ -3720,25 +2876,25 @@ static bool startMs2130AsyncBulkDiagnostic()
 
         if (r != LIBUSB_SUCCESS) {
 
-            gMs2130BulkInflight.fetch_sub(
+            gMjpegBulkInflight.fetch_sub(
                     1,
                     std::memory_order_acq_rel
             );
 
             LOGE(
-                    "MS2130 BULK async: initial submit failed "
+                    "MJPEG BULK async: initial submit failed "
                     "slot=%d: %d (%s)",
                     submitted,
                     r,
                     libusb_error_name(r)
             );
 
-            gMs2130BulkRunning.store(
+            gMjpegBulkRunning.store(
                     false,
                     std::memory_order_release
             );
 
-            stopMs2130AsyncBulkDiagnostic();
+            stopMjpegAsyncBulkTransport();
             return false;
         }
 
@@ -3751,10 +2907,10 @@ static bool startMs2130AsyncBulkDiagnostic()
             "maxFrame=%u target=1280x720 MJPEG60",
             UVC_VIDEO_ENDPOINT,
             maxPayload,
-            MS2130_BULK_ASYNC_TRANSFER_COUNT,
+            MJPEG_BULK_ASYNC_TRANSFER_COUNT,
             maxPayload *
                 static_cast<uint32_t>(
-                        MS2130_BULK_ASYNC_TRANSFER_COUNT
+                        MJPEG_BULK_ASYNC_TRANSFER_COUNT
                 ),
             maxFrame
     );
@@ -3777,7 +2933,7 @@ static bool startMs2130AsyncBulkDiagnostic()
         LOGE(
                 "MJPEG BULK start: timed out waiting for JPEG 4:2:2 SOF check"
         );
-        stopMs2130AsyncBulkDiagnostic();
+        stopMjpegAsyncBulkTransport();
         return false;
     }
 
@@ -3785,7 +2941,7 @@ static bool startMs2130AsyncBulkDiagnostic()
         LOGE(
                 "MJPEG BULK start: JPEG sampling is not YCbCr 4:2:2"
         );
-        stopMs2130AsyncBulkDiagnostic();
+        stopMjpegAsyncBulkTransport();
         return false;
     }
 
@@ -3803,450 +2959,11 @@ static bool startMs2130AsyncBulkDiagnostic()
 }
 
 
-static bool dumpMs2130OneMjpegFrame()
-{
-    static constexpr uint8_t UVC_STREAM_FID = 0x01;
-    static constexpr uint8_t UVC_STREAM_EOF = 0x02;
-    static constexpr uint8_t UVC_STREAM_ERR = 0x40;
-
-    static constexpr int BULK_TIMEOUT_MS = 500;
-    static constexpr int MAX_TIMEOUTS = 6;
-    static constexpr auto CAPTURE_DEADLINE =
-            std::chrono::seconds(5);
-
-    static constexpr const char* DUMP_DIR =
-            "/data/user/0/com.hev.uvcfieldmonitor/files";
-
-    static constexpr const char* DUMP_PATH =
-            "/data/user/0/com.hev.uvcfieldmonitor/files/"
-            "ms2130_720p60_first.jpg";
-
-    if (gUsbHandle == nullptr) {
-
-        LOGE(
-                "MS2130 BULK dump: USB handle is null"
-        );
-
-        return false;
-    }
-
-    const uint32_t maxPayload =
-            gProbeResult.maxPayloadTransferSize;
-
-    const uint32_t maxFrame =
-            gProbeResult.maxVideoFrameSize;
-
-    if (maxPayload < 2 ||
-        maxFrame < 4) {
-
-        LOGE(
-                "MS2130 BULK dump: invalid negotiated limits "
-                "maxPayload=%u maxFrame=%u",
-                maxPayload,
-                maxFrame
-        );
-
-        return false;
-    }
-
-    std::vector<unsigned char> transferBuffer(
-            maxPayload
-    );
-
-    std::vector<unsigned char> jpeg;
-    jpeg.reserve(
-            std::min<uint32_t>(
-                    maxFrame,
-                    512u * 1024u
-            )
-    );
-
-    bool collecting = false;
-    uint8_t collectingFid = 0;
-
-    uint64_t transfers = 0;
-    uint64_t payloads = 0;
-    uint64_t usbBytes = 0;
-    uint64_t videoBytes = 0;
-    uint64_t malformed = 0;
-    uint64_t uvcErrors = 0;
-    uint64_t fidResyncs = 0;
-    int timeouts = 0;
-
-    const auto started =
-            std::chrono::steady_clock::now();
-
-    LOGI(
-            "MS2130 BULK dump: start endpoint=0x%02X "
-            "transferBytes=%u maxFrame=%u timeout=%dms",
-            UVC_VIDEO_ENDPOINT,
-            maxPayload,
-            maxFrame,
-            BULK_TIMEOUT_MS
-    );
-
-    for (;;) {
-
-        if (std::chrono::steady_clock::now() -
-                started > CAPTURE_DEADLINE) {
-
-            LOGE(
-                    "MS2130 BULK dump: capture deadline exceeded"
-            );
-
-            return false;
-        }
-
-        int actualLength = 0;
-
-        const int r =
-                libusb_bulk_transfer(
-                        gUsbHandle,
-                        UVC_VIDEO_ENDPOINT,
-                        transferBuffer.data(),
-                        static_cast<int>(
-                                transferBuffer.size()
-                        ),
-                        &actualLength,
-                        BULK_TIMEOUT_MS
-                );
-
-        if (r == LIBUSB_ERROR_TIMEOUT) {
-
-            ++timeouts;
-
-            LOGI(
-                    "MS2130 BULK dump: timeout %d/%d",
-                    timeouts,
-                    MAX_TIMEOUTS
-            );
-
-            if (timeouts >= MAX_TIMEOUTS) {
-                return false;
-            }
-
-            continue;
-        }
-
-        if (r != LIBUSB_SUCCESS) {
-
-            LOGE(
-                    "MS2130 BULK dump: libusb_bulk_transfer "
-                    "failed: %d (%s)",
-                    r,
-                    libusb_error_name(r)
-            );
-
-            return false;
-        }
-
-        timeouts = 0;
-        ++transfers;
-
-        if (actualLength <= 0) {
-            continue;
-        }
-
-        usbBytes +=
-                static_cast<uint64_t>(
-                        actualLength
-                );
-
-        if (actualLength < 2) {
-
-            ++malformed;
-            continue;
-        }
-
-        const uint8_t headerLength =
-                transferBuffer[0];
-
-        const uint8_t flags =
-                transferBuffer[1];
-
-        if (headerLength < 2 ||
-            headerLength > actualLength) {
-
-            ++malformed;
-
-            LOGE(
-                    "MS2130 BULK dump: malformed UVC header "
-                    "headerLength=%u actual=%d",
-                    headerLength,
-                    actualLength
-            );
-
-            collecting = false;
-            jpeg.clear();
-            continue;
-        }
-
-        ++payloads;
-
-        const uint8_t fid =
-                (flags & UVC_STREAM_FID)
-                ? 1
-                : 0;
-
-        const bool eof =
-                (flags & UVC_STREAM_EOF) != 0;
-
-        const bool payloadError =
-                (flags & UVC_STREAM_ERR) != 0;
-
-        const unsigned char* payload =
-                transferBuffer.data() +
-                headerLength;
-
-        const size_t payloadBytes =
-                static_cast<size_t>(
-                        actualLength -
-                        headerLength
-                );
-
-        videoBytes +=
-                static_cast<uint64_t>(
-                        payloadBytes
-                );
-
-        if (payloadError) {
-
-            ++uvcErrors;
-            collecting = false;
-            jpeg.clear();
-            continue;
-        }
-
-        if (collecting &&
-            fid != collectingFid) {
-
-            ++fidResyncs;
-            collecting = false;
-            jpeg.clear();
-        }
-
-        size_t payloadOffset = 0;
-
-        if (!collecting) {
-
-            bool foundSoi = false;
-
-            for (size_t i = 0;
-                 i + 1 < payloadBytes;
-                 ++i) {
-
-                if (payload[i] == 0xff &&
-                    payload[i + 1] == 0xd8) {
-
-                    payloadOffset = i;
-                    foundSoi = true;
-                    break;
-                }
-            }
-
-            if (!foundSoi) {
-                continue;
-            }
-
-            collecting = true;
-            collectingFid = fid;
-            jpeg.clear();
-
-            LOGI(
-                    "MS2130 BULK dump: JPEG SOI synchronized "
-                    "transfer=%llu payload=%llu fid=%u offset=%zu",
-                    static_cast<unsigned long long>(
-                            transfers
-                    ),
-                    static_cast<unsigned long long>(
-                            payloads
-                    ),
-                    fid,
-                    payloadOffset
-            );
-        }
-
-        if (payloadOffset < payloadBytes) {
-
-            const size_t appendBytes =
-                    payloadBytes -
-                    payloadOffset;
-
-            if (jpeg.size() + appendBytes >
-                static_cast<size_t>(maxFrame)) {
-
-                LOGE(
-                        "MS2130 BULK dump: frame overflow "
-                        "%zu + %zu > %u",
-                        jpeg.size(),
-                        appendBytes,
-                        maxFrame
-                );
-
-                collecting = false;
-                jpeg.clear();
-                continue;
-            }
-
-            jpeg.insert(
-                    jpeg.end(),
-                    payload + payloadOffset,
-                    payload + payloadBytes
-            );
-        }
-
-        if (!eof ||
-            !collecting) {
-            continue;
-        }
-
-        size_t eoiEnd = 0;
-
-        for (size_t i = jpeg.size();
-             i >= 2;
-             --i) {
-
-            if (jpeg[i - 2] == 0xff &&
-                jpeg[i - 1] == 0xd9) {
-
-                eoiEnd = i;
-                break;
-            }
-        }
-
-        if (jpeg.size() < 4 ||
-            jpeg[0] != 0xff ||
-            jpeg[1] != 0xd8 ||
-            eoiEnd == 0) {
-
-            LOGE(
-                    "MS2130 BULK dump: EOF frame is not a complete JPEG "
-                    "bytes=%zu SOI=%s EOI=%s",
-                    jpeg.size(),
-                    (jpeg.size() >= 2 &&
-                     jpeg[0] == 0xff &&
-                     jpeg[1] == 0xd8)
-                    ? "YES"
-                    : "NO",
-                    eoiEnd != 0
-                    ? "YES"
-                    : "NO"
-            );
-
-            collecting = false;
-            jpeg.clear();
-            continue;
-        }
-
-        if (eoiEnd != jpeg.size()) {
-
-            LOGI(
-                    "MS2130 BULK dump: trimming %zu bytes after JPEG EOI",
-                    jpeg.size() - eoiEnd
-            );
-
-            jpeg.resize(
-                    eoiEnd
-            );
-        }
-
-        if (::mkdir(
-                DUMP_DIR,
-                0700
-            ) != 0 &&
-            errno != EEXIST) {
-
-            LOGE(
-                    "MS2130 BULK dump: mkdir failed errno=%d",
-                    errno
-            );
-
-            return false;
-        }
-
-        FILE* file =
-                std::fopen(
-                        DUMP_PATH,
-                        "wb"
-                );
-
-        if (file == nullptr) {
-
-            LOGE(
-                    "MS2130 BULK dump: fopen failed path=%s errno=%d",
-                    DUMP_PATH,
-                    errno
-            );
-
-            return false;
-        }
-
-        const size_t written =
-                std::fwrite(
-                        jpeg.data(),
-                        1,
-                        jpeg.size(),
-                        file
-                );
-
-        const int closeResult =
-                std::fclose(
-                        file
-                );
-
-        if (written != jpeg.size() ||
-            closeResult != 0) {
-
-            LOGE(
-                    "MS2130 BULK dump: file write failed "
-                    "written=%zu expected=%zu fclose=%d errno=%d",
-                    written,
-                    jpeg.size(),
-                    closeResult,
-                    errno
-            );
-
-            return false;
-        }
-
-        const double elapsedMs =
-                std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() -
-                        started
-                ).count();
-
-        LOGI(
-                "MS2130 BULK DUMP PASS: bytes=%zu fid=%u "
-                "transfers=%llu payloads=%llu usbBytes=%llu "
-                "videoBytes=%llu malformed=%llu uvcErr=%llu "
-                "fidResync=%llu elapsed=%.3f ms path=%s",
-                jpeg.size(),
-                collectingFid,
-                static_cast<unsigned long long>(transfers),
-                static_cast<unsigned long long>(payloads),
-                static_cast<unsigned long long>(usbBytes),
-                static_cast<unsigned long long>(videoBytes),
-                static_cast<unsigned long long>(malformed),
-                static_cast<unsigned long long>(uvcErrors),
-                static_cast<unsigned long long>(fidResyncs),
-                elapsedMs,
-                DUMP_PATH
-        );
-
-        logJpegSampling(
-                jpeg
-        );
-
-        return true;
-    }
-}
-
-
 static void closeLocked()
 {
-    // Stop and drain MS2130 asynchronous BULK transfers before
+    // Stop and drain asynchronous MJPEG BULK transfers before
     // releasing the shared libusb handle/context.
-    stopMs2130AsyncBulkDiagnostic();
+    stopMjpegAsyncBulkTransport();
 
     // Stop and drain asynchronous ISO URBs before changing
     // the streaming alternate setting or releasing IF1.
@@ -4486,7 +3203,7 @@ bool openFromAndroidFd(int fd)
     //
     // Unlike bcdUSB in the device descriptor, this reports the
     // speed at which this device is actually connected right now.
-    // Useful for checking whether an MS2130 is running over the
+    // Useful for checking whether the capture device is running over the
     // P30T/T7250 host path at USB 2.0 High-Speed or USB 3.x
     // SuperSpeed. This is diagnostic-only and does not affect
     // streaming setup.
@@ -4635,12 +3352,7 @@ bool openFromAndroidFd(int fd)
     );
 
     const bool modeDiscovered =
-            useMjpegBulk
-            ? discoverMs2130Mjpeg720p60Mode(
-                    device,
-                    gSelectedUvcMode
-            )
-            : discoverTargetUvcMode(
+            discoverTargetUvcMode(
                     device,
                     gSelectedUvcMode
             );
@@ -4675,7 +3387,7 @@ bool openFromAndroidFd(int fd)
     else {
 
         LOGI(
-                "MS2130 test: skipping MS2109 PU fixed preset"
+                "MS2130: skipping MS2109 PU fixed preset"
         );
     }
 
@@ -4738,7 +3450,7 @@ bool openFromAndroidFd(int fd)
 
     const bool probeCommitOk =
             useMjpegBulk
-            ? negotiateAndCommitMs2130MjpegBulk(
+            ? negotiateAndCommitMjpegBulk(
                     gSelectedUvcMode
             )
             : negotiateAndCommitStream(
@@ -4764,7 +3476,7 @@ bool openFromAndroidFd(int fd)
                 supportedDevice->name
         );
 
-        if (!startMs2130AsyncBulkDiagnostic()) {
+        if (!startMjpegAsyncBulkTransport()) {
 
             LOGE(
                     "%s Step 11.1: async BULK MJPEG start/4:2:2 check failed",
@@ -4779,7 +3491,7 @@ bool openFromAndroidFd(int fd)
         LOGI(
                 "%s BULK MJPEG RUNNING: 1280x720 MJPEG60, JPEG 4:2:2 verified; "
                 "1-second throughput/fps/latency stats enabled; "
-                "JPEG decode timing enabled; render intentionally not started",
+                "JPEG decode timing enabled; shared planar renderer active",
                 supportedDevice->name
         );
 
@@ -4826,38 +3538,33 @@ bool openFromAndroidFd(int fd)
 
     LOGI(
             "Step 10 complete: "
-            "720x480 YUYV30 committed, "
+            "%ux%u %s %.3f fps committed, "
             "ISO alt=%u active",
+            gSelectedUvcMode.width,
+            gSelectedUvcMode.height,
+            uvcVideoFormatName(
+                    gSelectedUvcMode.format
+            ),
+            interval100nsToFps(gSelectedUvcMode.frameInterval100ns),
             transport.altSetting
     );
 
     // --------------------------------------------------------
     // Step 11:
-    //   Start asynchronous isochronous reception.
-    //
-    //   This stage only validates UVC payload parsing and
-    //   reconstruction of complete 691200-byte YUYV frames.
-    //   Rendering is intentionally not connected yet.
+    //   Start asynchronous isochronous MJPEG reception.
+    //   uvc_stream owns USB transport only; uvc_mjpeg_decoder owns
+    //   JPEG assembly/decode/latest-frame publication.
     // --------------------------------------------------------
 
     uvc_stream::Config streamConfig{};
 
-    streamConfig.context =
-            gUsbContext;
-
-    streamConfig.handle =
-            gUsbHandle;
-
-    streamConfig.endpoint =
-            transport.endpointAddress;
-
+    streamConfig.context = gUsbContext;
+    streamConfig.handle = gUsbHandle;
+    streamConfig.endpoint = transport.endpointAddress;
     streamConfig.isoPacketBytes =
-            static_cast<int>(
-                    transport.capacityBytes
-            );
-
-    streamConfig.expectedFrameBytes =
-            TARGET_YUYV_FRAME_BYTES;
+            static_cast<int>(transport.capacityBytes);
+    streamConfig.maxCompressedFrameBytes =
+            gProbeResult.maxVideoFrameSize;
 
     if (!uvc_stream::start(
             streamConfig)) {
@@ -4872,9 +3579,8 @@ bool openFromAndroidFd(int fd)
     }
 
     LOGI(
-            "Step 11 complete: "
-            "async ISO ring running; "
-            "frame reconstruction enabled"
+            "Step 11 complete: async ISO MJPEG ring running; "
+            "output=shared planar YCbCr422"
     );
 
     return true;
