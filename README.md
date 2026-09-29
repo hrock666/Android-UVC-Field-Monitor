@@ -33,6 +33,7 @@ Android端末をUSB Video Class（UVC）キャプチャデバイスと組み合�
 - TurboJPEGによるplanar YCbCr 4:2:2 decode
 - GPUを利用したリアルタイム映像解析
 - SDR / HDR(PQ) Preview
+- Capture Calibration Profile Format v1のImport / Apply
 - 実機上でのレイテンシ計測と最適化
 
 旧720×480 YUYV fallbackは現行baselineから削除し、MS2109 / MS2130とも共通の720p60 MJPEG decode/render経路を使用します。
@@ -65,10 +66,14 @@ Android端末をUSB Video Class（UVC）キャプチャデバイスと組み合�
 
 ### HDR Preview
 
-入力modeがPQとして既知・選択されている場合、PreviewのみHDR→SDR変換を行います。
+ImportしたCalibration ProfileでTransfer Characteristicsが`PQ`と指定されている場合、PreviewのみHDR→SDR変換を行います。
 
 ```text
-YCbCr
+JPEG YCbCr
+  ↓
+BT.601 limited-range → R'G'B'
+  ↓
+Capture Calibration（Offset＋3×3 Matrix）
   ↓
 PQ EOTF
   ↓
@@ -79,7 +84,9 @@ BT.2020 → BT.709
 sRGB
 ```
 
-Scope側にはPQ EOTF / Tone Mappingを入れず、decoded source-domainのcode valueを保持します。
+PQコードはST 2084の絶対輝度として解釈します。現在のTone Mappingは203 nitをSDR reference whiteとする簡易実装です。
+
+Scope側にはPQ EOTF / Tone Mappingを入れず、Capture補正後のcode-domain信号を保持します。
 
 ### 映像スコープ
 
@@ -91,6 +98,65 @@ Scope側にはPQ EOTF / Tone Mappingを入れず、decoded source-domainのcode 
 - Vectorscope
 
 フィールドでの露出確認、レベル確認、色分布確認をAndroid端末単体で行うことを目的としています。
+
+---
+
+## Capture Calibration Profile
+
+別APKのUVC Capture Calibrationが生成したProfile Format v1 JSONを読み込み、キャプチャデバイス固有のPU値とRGB補正を適用できます。
+
+画面左上の`Import Profile`を押し、Calibration AppからExportしたJSONを選択します。正常なProfileはアプリ内部へ保存され、次回起動時に再読込されます。
+
+```text
+UVC Capture
+  ↓
+Profile Match
+  ↓
+Brightness / Contrast / Saturation / Hue
+  ↓
+BT.601 limited-range YCbCr → R'G'B'
+  ↓
+RGB Offset＋3×3 Matrix
+  ├─ Preview
+  └─ Waveform / RGB Parade / Histogram / Vectorscope
+```
+
+Field MonitorではCalibration Search、Matrix Solve、Patch Recognitionを行いません。完成済みProfileの照合と適用だけを行います。
+
+### Profile Matching
+
+少なくとも次の条件を検証します。
+
+- Profile Format Versionが1
+- VID / PIDが接続Deviceと一致
+- ProfileにSerialがある場合、接続DeviceのSerialと一致
+- Pixel FormatがMJPEG
+- Resolutionが1280×720
+- Frame Rateが60
+- Input Encodingが`RGB` / `YCBCR_444` / `YCBCR_422`
+- Rangeが`FULL` / `LIMITED`
+- Colorimetryが`BT601` / `BT709` / `BT2020`
+- Transfer Characteristicsが`SDR` / `PQ`
+- Validation Resultが`CALIBRATION_VALID`または`CALIBRATION_POOR_FIT`
+
+不一致時は補間や推測を行いません。画面へ`PROFILE_MODE_MISMATCH`を表示し、PU書込みとRGB補正を無効化します。JSONの構造や値が不正な場合は`PROFILE_INVALID`になります。
+
+Input ContractはProfileを現在の運用モードとして採用する方式です。HDMI InfoFrameやHDR Static Metadataから入力信号を自動判定し、Profile記載値と照合する機能は現時点ではありません。Import前に、実際の送信側設定とProfileのInput Contractが一致していることを確認してください。
+
+`CALIBRATION_POOR_FIT` Profileも比較・微調整用途のため適用できますが、画面上に品質状態を残します。
+
+### SDRとPQの処理
+
+| 処理 | SDR | PQ |
+|---|---|---|
+| Capture補正 | code-domain | code-domain |
+| Waveform / Parade / Histogram | 補正後コード値 | 補正後PQコード値 |
+| Vectorscope | 補正後RGBから再生成 | 補正後PQ RGBコードから再生成 |
+| Preview | 補正後RGBを表示 | PQ EOTF、Tone Mapping、BT.2020→BT.709、sRGB |
+
+ScopesにはEOTFやTone Mappingを適用しません。PQ Previewだけが絶対輝度へ変換されます。
+
+詳細は[Capture Calibration Profile適用（Phase 8）](docs/Capture_Calibration_Profile_Apply_Phase8.md)を参照してください。
 
 ---
 
@@ -108,16 +174,21 @@ flowchart LR
     H[Latest Decoded Frame]
     I[Persistent PBO]
     J[3-plane GL_R8]
-    K[Preview]
-    L[GPU Scopes]
-    M[Android Display]
+    K{Profile Match}
+    L[PU + Offset + 3x3 Matrix]
+    M[Preview]
+    N[GPU Scopes]
+    O[Android Display]
+    P[Calibration Profile JSON]
 
     A --> B
     B --> C --> E
     B --> D --> E
     E --> F --> G --> H --> I --> J
-    J --> K --> M
-    J --> L --> M
+    P --> K
+    K --> L
+    J --> L --> M --> O
+    L --> N --> O
 ```
 
 USB transportだけを分離し、UVC MJPEG payload以降のdecode / render / scope処理は共通化しています。
@@ -339,6 +410,7 @@ MIT Licenseがlibusbやlibjpeg-turboのコードへ適用されるものでは�
 - ディスプレイのリフレッシュレート
 - Androidの描画・Presentation経路
 - キャプチャデバイス固有の映像処理
+- Calibration ProfileのCapture Mode / Input Contract不一致
 
 すべてのUVCデバイスおよびAndroid端末での動作を保証するものではありません。
 
@@ -360,12 +432,14 @@ UvcFieldMonitor/
 │     └─ README.ijg
 │
 ├─ docs/
+│  ├─ Capture_Calibration_Profile_Apply_Phase8.md
 │  └─ images/
 │     └─ uvc-field-monitor.png
 │
 ├─ app/
 │  └─ src/main/
 │     └─ cpp/
+│        ├─ calibration_profile.cpp
 │        ├─ uvc_device.cpp
 │        ├─ uvc_stream.cpp
 │        ├─ uvc_mjpeg_decoder.cpp
@@ -387,6 +461,6 @@ UvcFieldMonitor/
 
 開発中。
 
-現在のbaselineは、**MS2109 / MS2130の1280×720p60 MJPEG入力を共通TurboJPEG / planar YCbCr / OpenGL ES経路で処理する構成**です。
+現在のbaselineは、**MS2109 / MS2130の1280×720p60 MJPEG入力を共通TurboJPEG / planar YCbCr / OpenGL ES経路で処理し、Capture Calibration ProfileをGPU PreviewとScopesへ適用する構成**です。
 
 低レイテンシUVC入力、HDR Preview、GPU映像スコープ、および複数Android hostでの実機検証を継続しています。
