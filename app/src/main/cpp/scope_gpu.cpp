@@ -1,4 +1,5 @@
 #include "scope_gpu.h"
+#include "calibration_profile.h"
 
 #include "field_monitor_layout.h"
 
@@ -148,6 +149,12 @@ layout(local_size_x = 16, local_size_y = 16) in;
 uniform sampler2D uY;
 uniform sampler2D uCb;
 uniform sampler2D uCr;
+uniform int uCalibrationEnabled;
+uniform vec3 uCalibrationRow0;
+uniform vec3 uCalibrationRow1;
+uniform vec3 uCalibrationRow2;
+uniform vec3 uCalibrationOffset;
+uniform int uColorimetry;
 
 layout(std430, binding = 0) buffer WaveformBuffer {
     uint wave[];
@@ -203,18 +210,31 @@ vec3 rgb601LimitedCodes(float y8, float cb8, float cr8)
     rgb.r = y + 1.402000 * cr;
     rgb.g = y - 0.344136 * cb - 0.714136 * cr;
     rgb.b = y + 1.772000 * cb;
+    rgb = clamp(rgb, 0.0, 1.0);
+    if (uCalibrationEnabled != 0) {
+        rgb = vec3(
+            dot(uCalibrationRow0, rgb),
+            dot(uCalibrationRow1, rgb),
+            dot(uCalibrationRow2, rgb)
+        ) + uCalibrationOffset;
+    }
     return clamp(rgb, 0.0, 1.0);
 }
 
-void accumulatePixel(int sourceX, uint yCode, float cb8, float cr8)
+vec3 lumaCoefficients()
 {
-    // Preserve the decoded 8-bit luma code exactly. The waveform buffer already
-    // spans 0..255; its studio-range IRE graticule remains anchored at 16..235.
-    // This keeps PQ code positions and below-black/above-white excursions intact.
+    if (uColorimetry == 0) return vec3(0.2990, 0.5870, 0.1140);
+    if (uColorimetry == 2) return vec3(0.2627, 0.6780, 0.0593);
+    return vec3(0.2126, 0.7152, 0.0722);
+}
+
+void accumulatePixel(int sourceX, uint sourceYCode, vec3 rgb)
+{
+    uint yCode = uCalibrationEnabled != 0
+        ? uint(round(clamp(dot(rgb, lumaCoefficients()), 0.0, 1.0) * 255.0))
+        : sourceYCode;
     uint waveX = uint(min(719, (sourceX * 720) / 1280));
     bumpWave(waveX, min(yCode, 255u));
-
-    vec3 rgb = rgb601LimitedCodes(float(yCode), cb8, cr8);
 
     int pyR = clamp(160 - int(round(rgb.r * 160.0)), 0, 160);
     int pyG = clamp(160 - int(round(rgb.g * 160.0)), 0, 160);
@@ -251,13 +271,23 @@ void main()
     float cb8 = round(texelFetch(uCb, p, 0).r * 255.0);
     float cr8 = round(texelFetch(uCr, p, 0).r * 255.0);
 
-    accumulatePixel(x0, y0, cb8, cr8);
-    accumulatePixel(x1, y1, cb8, cr8);
+    vec3 rgb0 = rgb601LimitedCodes(float(y0), cb8, cr8);
+    vec3 rgb1 = rgb601LimitedCodes(float(y1), cb8, cr8);
+    accumulatePixel(x0, y0, rgb0);
+    accumulatePixel(x1, y1, rgb1);
 
-    // Keep vectorscope in the source YCbCr domain. Nominal BT.601 limited
-    // chroma uses 224 code values peak-to-peak around code 128.
-    float cb = (cb8 - 128.0) / 224.0;
-    float cr = (cr8 - 128.0) / 224.0;
+    float cb;
+    float cr;
+    if (uCalibrationEnabled != 0) {
+        vec3 rgbPair = (rgb0 + rgb1) * 0.5;
+        vec3 coeff = lumaCoefficients();
+        float luma = dot(rgbPair, coeff);
+        cb = (rgbPair.b - luma) / (2.0 * (1.0 - coeff.b));
+        cr = (rgbPair.r - luma) / (2.0 * (1.0 - coeff.r));
+    } else {
+        cb = (cb8 - 128.0) / 224.0;
+        cr = (cr8 - 128.0) / 224.0;
+    }
 
     int gx = int(round(cb * 128.0 + 70.0));
     int gy = int(round(-cr * 128.0 + 70.0));
@@ -560,6 +590,30 @@ void ScopeGpu::queueFromYuv422Textures(
     glUniform1i(yLocation_, 0);
     glUniform1i(cbLocation_, 1);
     glUniform1i(crLocation_, 2);
+    const calibration_profile::Profile calibration =
+            calibration_profile::snapshot();
+    glUniform1i(
+            glGetUniformLocation(yuv422AccumulateProgram_, "uCalibrationEnabled"),
+            calibration.enabled ? 1 : 0);
+    glUniform3fv(
+            glGetUniformLocation(yuv422AccumulateProgram_, "uCalibrationRow0"),
+            1, calibration.matrix.data());
+    glUniform3fv(
+            glGetUniformLocation(yuv422AccumulateProgram_, "uCalibrationRow1"),
+            1, calibration.matrix.data() + 3);
+    glUniform3fv(
+            glGetUniformLocation(yuv422AccumulateProgram_, "uCalibrationRow2"),
+            1, calibration.matrix.data() + 6);
+    const GLfloat normalizedOffset[3] = {
+            calibration.offsetCode[0] / 255.0f,
+            calibration.offsetCode[1] / 255.0f,
+            calibration.offsetCode[2] / 255.0f};
+    glUniform3fv(
+            glGetUniformLocation(yuv422AccumulateProgram_, "uCalibrationOffset"),
+            1, normalizedOffset);
+    glUniform1i(
+            glGetUniformLocation(yuv422AccumulateProgram_, "uColorimetry"),
+            calibration.colorimetry);
     glDispatchCompute(
             static_cast<GLuint>((640 + 15) / 16),
             static_cast<GLuint>((720 + 15) / 16),

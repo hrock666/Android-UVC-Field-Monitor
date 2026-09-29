@@ -4,11 +4,8 @@ struct libusb_device_handle;
 
 namespace ms2109_pu_controls {
 
-// Apply the fixed MS2109 UVC Processing Unit preset used by the field monitor:
-//   brightness = 0
-//   contrast   = 128
-//   saturation = 132
-//   hue        = 0
+// Apply the UVC Processing Unit values from the matched calibration profile.
+// When no profile is enabled the current device values are left unchanged.
 //
 // The VideoControl interface and Processing Unit ID are discovered from the
 // active UVC descriptors. This test version uses class-specific EP0 control

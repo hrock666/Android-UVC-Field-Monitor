@@ -1,4 +1,5 @@
 #include "ms2109_pu_controls.h"
+#include "calibration_profile.h"
 
 #include <android/log.h>
 #include <libusb.h>
@@ -306,6 +307,12 @@ bool applyFixedPreset(libusb_device_handle* handle)
         return true;
     }
 
+    const calibration_profile::Profile profile = calibration_profile::snapshot();
+    if (!profile.enabled) {
+        LOGI("Phase 8: no matching calibration profile; PU unchanged");
+        return true;
+    }
+
     // PU requests are class-specific control transfers on EP0. Do not claim
     // VC IF0 here: Android's USB stack may already own that interface.
     const int kernelState =
@@ -318,26 +325,26 @@ bool applyFixedPreset(libusb_device_handle* handle)
     // remaining requests.
     const bool brightnessOk = setAndVerify16(
             handle, pu, "brightness", UVC_PU_BRIGHTNESS_CONTROL,
-            static_cast<uint16_t>(static_cast<int16_t>(0)), true);
+            static_cast<uint16_t>(static_cast<int16_t>(profile.pu[0])), true);
 
     const bool contrastOk = setAndVerify16(
             handle, pu, "contrast", UVC_PU_CONTRAST_CONTROL,
-            static_cast<uint16_t>(128), false);
+            static_cast<uint16_t>(profile.pu[1]), false);
 
     const bool saturationOk = setAndVerify16(
             handle, pu, "saturation", UVC_PU_SATURATION_CONTROL,
-            static_cast<uint16_t>(132), false);
+            static_cast<uint16_t>(profile.pu[2]), false);
 
     const bool hueOk = setAndVerify16(
             handle, pu, "hue", UVC_PU_HUE_CONTROL,
-            static_cast<uint16_t>(static_cast<int16_t>(0)), true);
+            static_cast<uint16_t>(static_cast<int16_t>(profile.pu[3])), true);
 
     const bool presetApplied =
             brightnessOk && contrastOk && saturationOk && hueOk;
 
     if (presetApplied) {
-        LOGI("Step 15.5 TEST complete: PU preset applied "
-             "brightness=0 contrast=128 saturation=132 hue=0");
+        LOGI("Phase 8: profile PU applied brightness=%d contrast=%d saturation=%d hue=%d",
+             profile.pu[0], profile.pu[1], profile.pu[2], profile.pu[3]);
     } else {
         LOGW("Step 15.5 TEST: PU preset incomplete "
              "(brightness=%s contrast=%s saturation=%s hue=%s); "

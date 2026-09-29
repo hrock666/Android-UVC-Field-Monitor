@@ -18,6 +18,7 @@
 #include "field_monitor_layout.h"
 #include "scope_ui.h"
 #include "scope_gpu.h"
+#include "calibration_profile.h"
 
 #include <algorithm>
 #include <numeric>
@@ -1640,6 +1641,11 @@ uniform sampler2D uY;
 uniform sampler2D uCb;
 uniform sampler2D uCr;
 uniform int uPqToSdr;
+uniform int uCalibrationEnabled;
+uniform vec3 uCalibrationRow0;
+uniform vec3 uCalibrationRow1;
+uniform vec3 uCalibrationRow2;
+uniform vec3 uCalibrationOffset;
 out vec4 outColor;
 
 // SMPTE ST 2084 (PQ) EOTF. Input is normalized PQ code value.
@@ -1722,6 +1728,15 @@ void main()
     rgb.b = y + 1.772000 * cb;
     rgb = clamp(rgb, 0.0, 1.0);
 
+    if (uCalibrationEnabled != 0) {
+        rgb = vec3(
+            dot(uCalibrationRow0, rgb),
+            dot(uCalibrationRow1, rgb),
+            dot(uCalibrationRow2, rgb)
+        ) + uCalibrationOffset;
+        rgb = clamp(rgb, 0.0, 1.0);
+    }
+
     if (uPqToSdr != 0) {
         // Preserve the existing planar-MJPEG YCbCr -> RGB reconstruction above.
         // Only the preview interprets the recovered R'G'B' as PQ/BT.2020.
@@ -1769,19 +1784,8 @@ void main()
         glUniform1i(glGetUniformLocation(program, "uCb"), 1);
         glUniform1i(glGetUniformLocation(program, "uCr"), 2);
 
-        // Preview-only switch. This does not alter ScopeGpu or source textures.
-        constexpr GLint PLANAR_MJPEG_PQ_TO_SDR_PREVIEW = 1;
-        glUniform1i(
-                glGetUniformLocation(program, "uPqToSdr"),
-                PLANAR_MJPEG_PQ_TO_SDR_PREVIEW
-        );
-
-        LOGI(
-                "Planar MJPEG preview transfer: %s",
-                PLANAR_MJPEG_PQ_TO_SDR_PREVIEW != 0
-                ? "PQ/ST2084 -> SDR/BT.709/sRGB; scopes unchanged"
-                : "native source code values"
-        );
+        glUniform1i(glGetUniformLocation(program, "uPqToSdr"), 0);
+        glUniform1i(glGetUniformLocation(program, "uCalibrationEnabled"), 0);
     }
 
     return program;
@@ -4370,6 +4374,31 @@ static void renderLoop(ANativeWindow* window)
         glBindTexture(GL_TEXTURE_2D, planarMjpegCrTexture);
         glUseProgram(planarMjpegProgram);
 
+        const calibration_profile::Profile calibration =
+                calibration_profile::snapshot();
+        glUniform1i(
+                glGetUniformLocation(planarMjpegProgram, "uCalibrationEnabled"),
+                calibration.enabled ? 1 : 0);
+        glUniform3fv(
+                glGetUniformLocation(planarMjpegProgram, "uCalibrationRow0"),
+                1, calibration.matrix.data());
+        glUniform3fv(
+                glGetUniformLocation(planarMjpegProgram, "uCalibrationRow1"),
+                1, calibration.matrix.data() + 3);
+        glUniform3fv(
+                glGetUniformLocation(planarMjpegProgram, "uCalibrationRow2"),
+                1, calibration.matrix.data() + 6);
+        const GLfloat normalizedOffset[3] = {
+                calibration.offsetCode[0] / 255.0f,
+                calibration.offsetCode[1] / 255.0f,
+                calibration.offsetCode[2] / 255.0f};
+        glUniform3fv(
+                glGetUniformLocation(planarMjpegProgram, "uCalibrationOffset"),
+                1, normalizedOffset);
+        glUniform1i(
+                glGetUniformLocation(planarMjpegProgram, "uPqToSdr"),
+                calibration.pqInput ? 1 : 0);
+
         glBindVertexArray(
                 vao
         );
@@ -4893,6 +4922,52 @@ Java_com_hev_uvcfieldmonitor_MainActivity_nativeCloseUsb(
         jobject /* thiz */)
 {
     uvc_device::close();
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_hev_uvcfieldmonitor_MainActivity_nativeConfigureCalibrationProfile(
+        JNIEnv* env,
+        jobject /* thiz */,
+        jfloatArray matrixArray,
+        jfloatArray offsetArray,
+        jintArray puArray,
+        jboolean pqInput,
+        jint colorimetry)
+{
+    if (matrixArray == nullptr || offsetArray == nullptr || puArray == nullptr ||
+        env->GetArrayLength(matrixArray) != 9 ||
+        env->GetArrayLength(offsetArray) != 3 ||
+        env->GetArrayLength(puArray) != 4) {
+        calibration_profile::clear();
+        return JNI_FALSE;
+    }
+
+    calibration_profile::Profile profile;
+    env->GetFloatArrayRegion(matrixArray, 0, 9, profile.matrix.data());
+    env->GetFloatArrayRegion(offsetArray, 0, 3, profile.offsetCode.data());
+    env->GetIntArrayRegion(puArray, 0, 4, profile.pu.data());
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        calibration_profile::clear();
+        return JNI_FALSE;
+    }
+    profile.enabled = true;
+    profile.pqInput = pqInput == JNI_TRUE;
+    profile.colorimetry = static_cast<int>(colorimetry);
+    calibration_profile::configure(profile);
+    LOGI("Phase 8: calibration profile configured (%s)",
+         profile.pqInput ? "PQ" : "SDR");
+    return JNI_TRUE;
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_hev_uvcfieldmonitor_MainActivity_nativeDisableCalibrationProfile(
+        JNIEnv* /* env */, jobject /* thiz */)
+{
+    calibration_profile::clear();
+    LOGI("Phase 8: calibration disabled");
 }
 
 

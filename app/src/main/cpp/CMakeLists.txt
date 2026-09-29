@@ -141,6 +141,7 @@ add_library(
         ${CMAKE_PROJECT_NAME}
         SHARED
         native-lib.cpp
+        calibration_profile.cpp
         ms2109_pu_controls.cpp
         uvc_mjpeg_decoder.cpp
         scope_gpu.cpp
