@@ -1,0 +1,8 @@
+#pragma once
+
+#ifndef UVCFM_ENABLE_DIAGNOSTICS
+#define UVCFM_ENABLE_DIAGNOSTICS 0
+#endif
+
+inline constexpr bool UVCFM_DIAGNOSTICS_ENABLED =
+        UVCFM_ENABLE_DIAGNOSTICS != 0;

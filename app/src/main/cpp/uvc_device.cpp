@@ -1,4 +1,5 @@
 #include "uvc_device.h"
+#include "diagnostic_config.h"
 #include "uvc_stream.h"
 #include "ms2109_pu_controls.h"
 #include "uvc_mjpeg_decoder.h"
@@ -2460,42 +2461,31 @@ static void processMjpegBulkPayload(
 
     ++gMjpegBulkStats.goodFrames;
 
-    gMjpegBulkStats.windowFrameBytesSum +=
-            static_cast<uint64_t>(
-                    gMjpegBulkFrame.bytes
+    if (UVCFM_DIAGNOSTICS_ENABLED) {
+        gMjpegBulkStats.windowFrameBytesSum +=
+                static_cast<uint64_t>(gMjpegBulkFrame.bytes);
+        gMjpegBulkStats.windowFrameBytesMin =
+                std::min(gMjpegBulkStats.windowFrameBytesMin,
+                         gMjpegBulkFrame.bytes);
+        gMjpegBulkStats.windowFrameBytesMax =
+                std::max(gMjpegBulkStats.windowFrameBytesMax,
+                         gMjpegBulkFrame.bytes);
+        gMjpegBulkStats.wireFrameMs.push_back(wireFrameMs);
+
+        if (gMjpegBulkStats.lastGoodEofNs != 0) {
+            gMjpegBulkStats.frameIntervalMs.push_back(
+                    static_cast<double>(
+                            callbackNs - gMjpegBulkStats.lastGoodEofNs
+                    ) / 1'000'000.0
             );
-
-    gMjpegBulkStats.windowFrameBytesMin =
-            std::min(
-                    gMjpegBulkStats.windowFrameBytesMin,
-                    gMjpegBulkFrame.bytes
-            );
-
-    gMjpegBulkStats.windowFrameBytesMax =
-            std::max(
-                    gMjpegBulkStats.windowFrameBytesMax,
-                    gMjpegBulkFrame.bytes
-            );
-
-    gMjpegBulkStats.wireFrameMs.push_back(
-            wireFrameMs
-    );
-
-    if (gMjpegBulkStats.lastGoodEofNs != 0) {
-
-        gMjpegBulkStats.frameIntervalMs.push_back(
-                static_cast<double>(
-                        callbackNs -
-                        gMjpegBulkStats.lastGoodEofNs
-                ) /
-                1'000'000.0
-        );
+        }
     }
 
     gMjpegBulkStats.lastGoodEofNs =
             callbackNs;
 
-    if (gMjpegBulkStats.goodFrames <= 5) {
+    if (UVCFM_DIAGNOSTICS_ENABLED &&
+        gMjpegBulkStats.goodFrames <= 5) {
 
         LOGI(
                 "MJPEG BULK FRAME #%llu: bytes=%zu payloads=%u "
@@ -2569,9 +2559,11 @@ static void LIBUSB_CALL onMjpegBulkTransfer(
         }
     }
 
-    maybeLogMjpegBulkStats(
-            callbackNs
-    );
+    if (UVCFM_DIAGNOSTICS_ENABLED) {
+        maybeLogMjpegBulkStats(
+                callbackNs
+        );
+    }
 
     if (!canResubmit ||
         !gMjpegBulkRunning.load(
@@ -2675,7 +2667,8 @@ static void mjpegBulkEventLoop()
         }
     }
 
-    LOGI(
+    if (UVCFM_DIAGNOSTICS_ENABLED) {
+        LOGI(
             "MJPEG BULK async event thread stopped: "
             "frames=%llu transfers=%llu failed=%llu submitErr=%llu "
             "drop=%llu malformed=%llu uvcErr=%llu fidResync=%llu overflow=%llu",
@@ -2688,7 +2681,8 @@ static void mjpegBulkEventLoop()
             static_cast<unsigned long long>(gMjpegBulkStats.uvcErrors),
             static_cast<unsigned long long>(gMjpegBulkStats.fidResyncs),
             static_cast<unsigned long long>(gMjpegBulkStats.overflowFrames)
-    );
+        );
+    }
 }
 
 

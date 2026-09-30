@@ -1,4 +1,5 @@
 #include "scope_gpu.h"
+#include "diagnostic_config.h"
 #include "calibration_profile.h"
 
 #include "field_monitor_layout.h"
@@ -30,9 +31,10 @@ static constexpr size_t VECTOR_BYTES = VECTOR_ITEMS * sizeof(uint32_t);
 static constexpr size_t MAXIMA_ITEMS = 8;
 static constexpr size_t MAXIMA_BYTES = MAXIMA_ITEMS * sizeof(uint32_t);
 
-// Periodic scope queue telemetry is useful during GPU tuning but too noisy
-// for normal operation. Startup validation and final statistics remain.
-static constexpr bool ENABLE_SCOPE_STATS_LOG = false;
+// Scope queue telemetry, startup readback validation, and final statistics
+// are diagnostic-build features only.
+static constexpr bool ENABLE_SCOPE_STATS_LOG =
+        UVCFM_DIAGNOSTICS_ENABLED;
 
 GLuint compileShader(GLenum type, const char* source)
 {
@@ -460,7 +462,8 @@ void ScopeGpu::poll(bool preDispatchPoll)
             ++preDispatchPromotions_;
         }
 
-        if (validationPasses_ + validationFailures_ < 3) {
+        if (UVCFM_DIAGNOSTICS_ENABLED &&
+            validationPasses_ + validationFailures_ < 3) {
             const Slot& front = slots_[front_];
 
             const uint64_t waveformSum =
@@ -668,10 +671,11 @@ GLuint ScopeGpu::frontMaximaSsbo() const
 
 void ScopeGpu::shutdown()
 {
-    if (clearProgram_ != 0 ||
+    if (UVCFM_DIAGNOSTICS_ENABLED &&
+        (clearProgram_ != 0 ||
         yuv422AccumulateProgram_ != 0 ||
         slots_[0].waveformSsbo != 0 ||
-        slots_[1].waveformSsbo != 0) {
+        slots_[1].waveformSsbo != 0)) {
 
         LOGI(
                 "Step 15.4 scope stats: enabled=%s dispatch=%llu promote=%llu "

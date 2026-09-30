@@ -1,4 +1,5 @@
 #include "uvc_mjpeg_decoder.h"
+#include "diagnostic_config.h"
 
 #include <android/log.h>
 #include <turbojpeg.h>
@@ -46,7 +47,8 @@ static constexpr int DECODED_FRAME_SLOT_COUNT = 3;
 
 // Color-bar/range diagnostics are development-only and consume CPU on
 // decoded frames. Keep them off during normal field-monitor operation.
-static constexpr bool ENABLE_PATTERN_DIAG = false;
+static constexpr bool ENABLE_PATTERN_DIAG =
+        UVCFM_DIAGNOSTICS_ENABLED;
 
 enum DecodedSlotState : int {
     SLOT_FREE = 0,
@@ -1335,11 +1337,13 @@ static void workerLoop()
             gStats.jpegBytesMin = std::min(gStats.jpegBytesMin, job.jpeg.size());
             gStats.jpegBytesMax = std::max(gStats.jpegBytesMax, job.jpeg.size());
 
-            gStats.queueMs.push_back(queueMs);
-            gStats.headerMs.push_back(headerMs);
-            gStats.decodeCallMs.push_back(decodeCallMs);
-            gStats.totalDecodeMs.push_back(totalDecodeMs);
-            gStats.hostB0toB2Ms.push_back(hostB0toB2Ms);
+            if (UVCFM_DIAGNOSTICS_ENABLED) {
+                gStats.queueMs.push_back(queueMs);
+                gStats.headerMs.push_back(headerMs);
+                gStats.decodeCallMs.push_back(decodeCallMs);
+                gStats.totalDecodeMs.push_back(totalDecodeMs);
+                gStats.hostB0toB2Ms.push_back(hostB0toB2Ms);
+            }
 
             if (!gOutputInfoLogged) {
                 LOGI(
@@ -1360,7 +1364,8 @@ static void workerLoop()
                 gOutputInfoLogged = true;
             }
 
-            if (gStats.decoded <= 5) {
+            if (UVCFM_DIAGNOSTICS_ENABLED &&
+                gStats.decoded <= 5) {
                 LOGI(
                         "UVC MJPEG TurboJPEG DECODE #%llu: jpeg=%zu queueMs=%.3f "
                         "headerMs=%.3f decodeCallMs=%.3f totalMs=%.3f "
@@ -1393,7 +1398,9 @@ static void workerLoop()
             }
         }
 
-        maybeLogStatsLocked(decodeDoneNs);
+        if (UVCFM_DIAGNOSTICS_ENABLED) {
+            maybeLogStatsLocked(decodeDoneNs);
+        }
     }
 
     LOGI("UVC MJPEG TurboJPEG worker stopped");

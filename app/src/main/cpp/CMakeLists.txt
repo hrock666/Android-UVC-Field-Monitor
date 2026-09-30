@@ -11,6 +11,12 @@ cmake_minimum_required(VERSION 3.22.1)
 # build script scope).
 project("uvcfieldmonitor")
 
+option(
+        UVCFM_ENABLE_DIAGNOSTICS
+        "Enable native timing, validation, and periodic diagnostic telemetry"
+        OFF
+)
+
 # Creates and names a library, sets it as either STATIC
 # or SHARED, and provides the relative paths to its source code.
 # You can define multiple libraries, and CMake builds them for you.
@@ -148,6 +154,12 @@ add_library(
         scope_ui.cpp
         uvc_device.cpp
         uvc_stream.cpp
+)
+
+target_compile_definitions(
+        ${CMAKE_PROJECT_NAME}
+        PRIVATE
+        UVCFM_ENABLE_DIAGNOSTICS=$<BOOL:${UVCFM_ENABLE_DIAGNOSTICS}>
 )
 
 target_include_directories(

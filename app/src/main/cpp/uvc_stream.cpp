@@ -1,5 +1,6 @@
 #include "uvc_stream.h"
 #include "uvc_mjpeg_decoder.h"
+#include "diagnostic_config.h"
 
 #include <android/log.h>
 
@@ -226,7 +227,9 @@ static void LIBUSB_CALL onIsoTransfer(
             );
         }
 
-        maybeLogStats();
+        if (UVCFM_DIAGNOSTICS_ENABLED) {
+            maybeLogStats();
+        }
     }
     else if (status != LIBUSB_TRANSFER_CANCELLED) {
         ++gStats.transfersFailed;
@@ -358,20 +361,22 @@ static void stopLocked()
         gOwnsSharedMjpegDecoder = false;
     }
 
-    LOGI(
-            "Step 12 ISO final: input=MJPEG usbBytes=%llu videoBytes=%llu "
-            "transfers=%llu transferFail=%llu isoPackets=%llu isoErr=%llu "
-            "uvcErr=%llu malformed=%llu EOF=%llu",
-            static_cast<unsigned long long>(gStats.usbBytes),
-            static_cast<unsigned long long>(gStats.videoBytes),
-            static_cast<unsigned long long>(gStats.transfersCompleted),
-            static_cast<unsigned long long>(gStats.transfersFailed),
-            static_cast<unsigned long long>(gStats.isoPackets),
-            static_cast<unsigned long long>(gStats.isoPacketErrors),
-            static_cast<unsigned long long>(gStats.uvcErrorPayloads),
-            static_cast<unsigned long long>(gStats.malformedHeaders),
-            static_cast<unsigned long long>(gStats.eofBoundaries)
-    );
+    if (UVCFM_DIAGNOSTICS_ENABLED) {
+        LOGI(
+                "Step 12 ISO final: input=MJPEG usbBytes=%llu videoBytes=%llu "
+                "transfers=%llu transferFail=%llu isoPackets=%llu isoErr=%llu "
+                "uvcErr=%llu malformed=%llu EOF=%llu",
+                static_cast<unsigned long long>(gStats.usbBytes),
+                static_cast<unsigned long long>(gStats.videoBytes),
+                static_cast<unsigned long long>(gStats.transfersCompleted),
+                static_cast<unsigned long long>(gStats.transfersFailed),
+                static_cast<unsigned long long>(gStats.isoPackets),
+                static_cast<unsigned long long>(gStats.isoPacketErrors),
+                static_cast<unsigned long long>(gStats.uvcErrorPayloads),
+                static_cast<unsigned long long>(gStats.malformedHeaders),
+                static_cast<unsigned long long>(gStats.eofBoundaries)
+        );
+    }
 
     freeTransfers();
     gInflightTransfers.store(0, std::memory_order_release);

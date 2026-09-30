@@ -18,6 +18,7 @@
 #include "field_monitor_layout.h"
 #include "scope_ui.h"
 #include "scope_gpu.h"
+#include "diagnostic_config.h"
 #include "calibration_profile.h"
 
 #include <algorithm>
@@ -344,7 +345,8 @@ static constexpr size_t PLANAR_MJPEG_YUV422_FRAME_BYTES =
 
 // Normal operation keeps Logcat focused on transport/decode health.
 // Enable only when detailed render/presentation timing is needed.
-static constexpr bool ENABLE_VERBOSE_TIMING_LOG = false;
+static constexpr bool ENABLE_VERBOSE_TIMING_LOG =
+        UVCFM_DIAGNOSTICS_ENABLED;
 
 // Step 13.2 result retained for Step 14.
 //
@@ -3518,6 +3520,7 @@ static void renderLoop(ANativeWindow* window)
     PresentationTracker presentationTracker{};
 
     const bool frameTimestampsExtension =
+            UVCFM_DIAGNOSTICS_ENABLED &&
             hasEglExtension(
                     display,
                     "EGL_ANDROID_get_frame_timestamps"
@@ -3700,7 +3703,8 @@ static void renderLoop(ANativeWindow* window)
     uint64_t presentationTimeHintErrors = 0;
 
 
-    if (STEP13_2_PRESENTATION_TIME_HINT_NOW) {
+    if (UVCFM_DIAGNOSTICS_ENABLED &&
+        STEP13_2_PRESENTATION_TIME_HINT_NOW) {
 
         const bool presentationTimeExtension =
                 hasEglExtension(
@@ -3743,12 +3747,14 @@ static void renderLoop(ANativeWindow* window)
     }
 
 
-    LOGI(
-            "Step 13.2 A/B mode: %s",
-            presentationTimeHintEnabled
-            ? "B = eglPresentationTimeANDROID(now)"
-            : "A = Step 13.1 baseline / hint disabled"
-    );
+    if (UVCFM_DIAGNOSTICS_ENABLED) {
+        LOGI(
+                "Step 13.2 A/B mode: %s",
+                presentationTimeHintEnabled
+                ? "B = eglPresentationTimeANDROID(now)"
+                : "A = Step 13.1 baseline / hint disabled"
+        );
+    }
 
 
 // --------------------------------------------------------
@@ -4800,19 +4806,15 @@ static void renderLoop(ANativeWindow* window)
     }
 
 
-    LOGI(
-            "Step 14 presentation hint final: mode=%s "
-            "hintCalls=%llu hintErrors=%llu",
-            presentationTimeHintEnabled
-            ? "B"
-            : "A",
-            static_cast<unsigned long long>(
-                    presentationTimeHintCalls
-            ),
-            static_cast<unsigned long long>(
-                    presentationTimeHintErrors
-            )
-    );
+    if (UVCFM_DIAGNOSTICS_ENABLED) {
+        LOGI(
+                "Step 14 presentation hint final: mode=%s "
+                "hintCalls=%llu hintErrors=%llu",
+                presentationTimeHintEnabled ? "B" : "A",
+                static_cast<unsigned long long>(presentationTimeHintCalls),
+                static_cast<unsigned long long>(presentationTimeHintErrors)
+        );
+    }
 
 
     for (auto& slot : planarMjpegPbo) {
