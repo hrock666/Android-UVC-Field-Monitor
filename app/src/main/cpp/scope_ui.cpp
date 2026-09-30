@@ -430,6 +430,16 @@ layout(std430, binding = 4) readonly buffer MaximaBuffer {
 
 out vec4 outColor;
 
+float histogramDensity(uint count, uint channelMax)
+{
+    if (count == 0u || channelMax == 0u) {
+        return 0.0;
+    }
+
+    return log(1.0 + float(count)) /
+           log(1.0 + float(channelMax));
+}
+
 void main()
 {
     const int PANEL_W = 285;
@@ -458,11 +468,6 @@ void main()
             255
         );
 
-        // Mali-G57 GLSL ES compiler can reject passing a readonly SSBO
-        // element directly to a built-in function. Copy to a local first.
-        uint hmax = maxima[4];
-        uint hm = max(hmax, 1u);
-
         for (int channel = 0; channel < 3; ++channel) {
             uint count = histogram[channel * 256 + bin];
 
@@ -470,18 +475,37 @@ void main()
                 continue;
             }
 
-            float n = float(count) / float(hm);
+            // Normalize and compress each channel independently so a strong
+            // peak in one channel does not hide detail in the others.
+            uint channelMax = maxima[4 + channel];
+            float n = histogramDensity(count, channelMax);
             int yy = BOTTOM - int(round(n * float(BOTTOM - TOP)));
 
             if (p.y >= yy && p.y <= BOTTOM) {
+                bool clippingBin = bin == 0 || bin == 255;
                 if (channel == 0) {
-                    color = max(color, vec3(1.0, 0.0, 0.0));
+                    color = max(
+                        color,
+                        clippingBin
+                            ? vec3(1.0, 0.35, 0.35)
+                            : vec3(1.0, 0.0, 0.0)
+                    );
                 }
                 else if (channel == 1) {
-                    color = max(color, vec3(0.0, 1.0, 0.0));
+                    color = max(
+                        color,
+                        clippingBin
+                            ? vec3(0.35, 1.0, 0.35)
+                            : vec3(0.0, 1.0, 0.0)
+                    );
                 }
                 else {
-                    color = max(color, vec3(0.0, 80.0 / 255.0, 1.0));
+                    color = max(
+                        color,
+                        clippingBin
+                            ? vec3(0.35, 0.55, 1.0)
+                            : vec3(0.0, 80.0 / 255.0, 1.0)
+                    );
                 }
             }
         }
@@ -620,7 +644,7 @@ void main()
 
         // Mali-G57: same readonly-SSBO qualifier workaround as Parade
         // and Histogram. Pass a plain local value to density().
-        uint vmax = maxima[5];
+        uint vmax = maxima[7];
         intensity = density(d, vmax, 1.4);
     }
 

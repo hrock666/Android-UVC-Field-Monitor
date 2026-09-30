@@ -27,7 +27,7 @@ static constexpr size_t HIST_BYTES = HIST_ITEMS * sizeof(uint32_t);
 static constexpr int VECTOR_D = 141;
 static constexpr size_t VECTOR_ITEMS = static_cast<size_t>(VECTOR_D) * VECTOR_D;
 static constexpr size_t VECTOR_BYTES = VECTOR_ITEMS * sizeof(uint32_t);
-static constexpr size_t MAXIMA_ITEMS = 6;
+static constexpr size_t MAXIMA_ITEMS = 8;
 static constexpr size_t MAXIMA_BYTES = MAXIMA_ITEMS * sizeof(uint32_t);
 
 // Periodic scope queue telemetry is useful during GPU tuning but too noisy
@@ -128,7 +128,7 @@ void main()
         vectorscope[i] = 0u;
     }
 
-    if (i < 6u) {
+    if (i < 8u) {
         maxima[i] = 0u;
     }
 }
@@ -187,16 +187,16 @@ void bumpParade(int index, int maxIndex)
     atomicMax(maxima[maxIndex], v);
 }
 
-void bumpHistogram(int index)
+void bumpHistogram(int index, int channel)
 {
     uint v = atomicAdd(histogram[index], 1u) + 1u;
-    atomicMax(maxima[4], v);
+    atomicMax(maxima[4 + channel], v);
 }
 
 void bumpVector(int index)
 {
     uint v = atomicAdd(vectorscope[index], 1u) + 1u;
-    atomicMax(maxima[5], v);
+    atomicMax(maxima[7], v);
 }
 
 vec3 rgb601LimitedCodes(float y8, float cb8, float cr8)
@@ -249,9 +249,9 @@ void accumulatePixel(int sourceX, uint sourceYCode, vec3 rgb)
     bumpParade(pyB * 224 + pxB, 3);
 
     ivec3 bins = ivec3(round(rgb * 255.0));
-    bumpHistogram(0 * 256 + clamp(bins.r, 0, 255));
-    bumpHistogram(1 * 256 + clamp(bins.g, 0, 255));
-    bumpHistogram(2 * 256 + clamp(bins.b, 0, 255));
+    bumpHistogram(0 * 256 + clamp(bins.r, 0, 255), 0);
+    bumpHistogram(1 * 256 + clamp(bins.g, 0, 255), 1);
+    bumpHistogram(2 * 256 + clamp(bins.b, 0, 255), 2);
 }
 
 void main()
