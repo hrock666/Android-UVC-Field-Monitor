@@ -3298,12 +3298,12 @@ static void renderLoop(ANativeWindow* window)
                     uiLayout.histogram
             );
 
-    // Preserve the original 284:200 vectorscope shader geometry.
+    // Preserve the cropped 239:200 vectorscope shader geometry.
     // This keeps the measured circle circular in the wider portrait panel.
     const field_monitor::RectI vectorscopeContentRect =
             aspectFitRect(
                     uiLayout.vectorscope,
-                    284,
+                    239,
                     200
             );
 

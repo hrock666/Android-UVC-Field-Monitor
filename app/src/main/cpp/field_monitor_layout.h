@@ -58,9 +58,9 @@ inline UiLayout makeLandscapeUiLayout()
     out.runtimeStatus = {0, 428, 711, 26};
 
     out.waveform = {711, 28, 330, 200};
-    out.parade = {1041, 28, 239, 200};
-    out.histogram = {711, 228, 285, 200};
-    out.vectorscope = {996, 228, 284, 200};
+    out.parade = {711, 228, 330, 200};
+    out.histogram = {1041, 228, 239, 200};
+    out.vectorscope = {1041, 28, 239, 200};
     return out;
 }
 
@@ -86,13 +86,12 @@ inline UiLayout makePortraitUiLayout()
     out.preview = {36, 28, 638, 359};
     out.runtimeStatus = {0, 387, 710, 22};
 
-    // Preserve the draft's column ratios:
-    // top row 330:239 -> 413:297
-    // bottom row 285:284 -> 357:353
+    // Keep Waveform and RGB Parade in one equal-width column. Vectorscope
+    // and Histogram share the right column.
     out.waveform = {0, 409, 413, 193};
-    out.parade = {413, 409, 297, 193};
-    out.histogram = {0, 602, 357, 194};
-    out.vectorscope = {357, 602, 353, 194};
+    out.parade = {0, 602, 413, 194};
+    out.histogram = {413, 602, 297, 194};
+    out.vectorscope = {413, 409, 297, 193};
     return out;
 }
 
@@ -207,7 +206,7 @@ inline Viewport uiLogicalRectToViewport(
             static_cast<float>(rect.height));
 }
 
-// Vectorscope data shader was authored for a 284x200 panel.  In portrait the
+// Vectorscope data shader is authored for a 239x200 panel.  In portrait the
 // panel is wider relative to its height; aspect-fit the shader viewport inside
 // the panel so the measured scope stays circular instead of becoming an oval.
 inline RectI aspectFitRect(

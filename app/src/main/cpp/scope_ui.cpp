@@ -597,9 +597,9 @@ float density(uint v, uint vmax, float gain)
 
 void main()
 {
-    const int PANEL_W = 284;
+    const int PANEL_W = 239;
     const int PANEL_H = 200;
-    const int CX = 142;
+    const int CX = 119;
     const int CY = 111;
     const int RADIUS = 70;
     const int VECTOR_D = 141;
@@ -1643,14 +1643,13 @@ void ScopeUi::drawOverlay(
         );
 
 
-        // Vectorscope: aspect-fit the original 284x200 scope geometry inside
-        // the current panel.  This is especially important in portrait,
-        // where the panel itself is wider; the measured vector circle must
-        // remain a circle, not an ellipse.
+        // Vectorscope: aspect-fit the cropped 239x200 scope geometry inside
+        // the current panel. The measured vector circle remains a circle in
+        // both landscape and portrait layouts.
         const RectI vectorContent =
                 aspectFitRect(
                         vectorPanel,
-                        284,
+                        239,
                         200
                 );
 
@@ -1660,7 +1659,7 @@ void ScopeUi::drawOverlay(
 
         const float vectorCx =
                 static_cast<float>(vectorContent.x) +
-                142.0f * vectorScaleToPanel;
+                119.0f * vectorScaleToPanel;
 
         const float vectorCy =
                 static_cast<float>(vectorContent.y) +
