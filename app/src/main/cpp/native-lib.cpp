@@ -4412,13 +4412,6 @@ static void renderLoop(ANativeWindow* window)
 
         // Step 15.4: display the latest completed scope SSBOs.
         // ScopeUi never waits; ScopeGpu only exposes completed front data.
-        scopeUi.drawWaveform(
-                scopeGpu.frontWaveformSsbo(),
-                scopeGpu.frontValid(),
-                waveformViewport,
-                vao
-        );
-
         scopeUi.drawParade(
                 scopeGpu.frontParadeSsbo(),
                 scopeGpu.frontMaximaSsbo(),
@@ -4444,14 +4437,21 @@ static void renderLoop(ANativeWindow* window)
         );
 
 
-        // Grid, labels, safe guide and scope graticules are drawn last
-        // so the CM4 visual hierarchy remains exact over the waveform.
+        // Draw the grid, labels, safe guide and scope graticules before the
+        // waveform so samples that coincide with a grid line remain visible.
         scopeUi.drawOverlay(
                 uiFps,
                 width,
                 height,
                 uiLayout,
                 uiCanvas,
+                vao
+        );
+
+        scopeUi.drawWaveform(
+                scopeGpu.frontWaveformSsbo(),
+                scopeGpu.frontValid(),
+                waveformViewport,
                 vao
         );
 

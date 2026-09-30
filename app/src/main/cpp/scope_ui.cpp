@@ -172,9 +172,15 @@ void main()
         }
     }
 
+    if (intensity <= 0.0) {
+        discard;
+    }
+
+    // The waveform is composited after the graticule.  Use the measured
+    // density as alpha so only waveform samples cover the grid beneath them.
     outColor = vec4(
-        vec3(clamp(intensity, 0.0, 1.0)),
-        1.0
+        vec3(1.0),
+        clamp(intensity, 0.0, 1.0)
     );
 }
 )";
@@ -870,7 +876,10 @@ void ScopeUi::drawWaveform(
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, waveformSsbo);
     glUseProgram(waveformRenderProgram_);
     glBindVertexArray(vao);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_BLEND);
 }
 
 void ScopeUi::drawParade(
@@ -1391,7 +1400,7 @@ void ScopeUi::drawOverlay(
         addText(
                 wavePanel.x + 9,
                 wavePanel.y + 7,
-                "WAVEFORM  LUMA / IRE + CODE",
+                "WAVEFORM  LUMA / % + CODE",
                 label,
                 1
         );
@@ -1421,11 +1430,15 @@ void ScopeUi::drawOverlay(
         );
 
 
-        // Waveform plot grid + IRE labels.  Geometry is expressed as the
+        // Waveform plot grid + full-range percentage/code labels.  Geometry
+        // is expressed as the
         // original 330x200 panel ratios so the data shader and overlay remain
         // aligned when the portrait panel becomes 413x193.
-        static constexpr int ireValues[] = {
+        static constexpr int percentValues[] = {
                 0, 25, 50, 75, 100
+        };
+        static constexpr int codeValues[] = {
+                0, 64, 128, 191, 255
         };
 
         const int waveLeft =
@@ -1448,21 +1461,17 @@ void ScopeUi::drawOverlay(
                         static_cast<int>(std::lround(
                                 wavePanel.height * (161.0 / 200.0))));
 
-        for (int ire : ireValues) {
+        for (size_t i = 0; i < std::size(percentValues); ++i) {
 
-            const double yCode =
-                    16.0 +
-                    (
-                        static_cast<double>(ire) /
-                        100.0
-                    ) * 219.0;
+            const int percent = percentValues[i];
+            const int code = codeValues[i];
 
             const int waveRow =
                     wavePlotH - 1 -
                     static_cast<int>(
                             std::lround(
                                     (
-                                        yCode /
+                                        static_cast<double>(code) /
                                         255.0
                                     ) *
                                     static_cast<double>(
@@ -1475,6 +1484,11 @@ void ScopeUi::drawOverlay(
                     waveTop +
                     waveRow;
 
+            const int labelY =
+                    percent == 100 ? y + 2 :
+                    percent == 0 ? y - 8 :
+                    y - 3;
+
             addRect(
                     static_cast<float>(waveLeft),
                     static_cast<float>(y),
@@ -1485,50 +1499,22 @@ void ScopeUi::drawOverlay(
 
             addText(
                     wavePanel.x + 3,
-                    y - 3,
-                    std::to_string(ire),
+                    labelY,
+                    std::to_string(percent),
+                    axis,
+                    1
+            );
+
+            const std::string codeText = std::to_string(code);
+            addText(
+                    waveLeft + wavePlotW -
+                            static_cast<int>(codeText.size()) * 6 - 4,
+                    labelY,
+                    codeText,
                     axis,
                     1
             );
         }
-
-
-        // The data shader renders the complete 8-bit code domain.  Mark the
-        // absolute code rails separately from the studio-range IRE grid so
-        // codes below 16 / above 235 are visibly available without implying
-        // that the UVC capture path necessarily preserves HDMI footroom/headroom semantics.
-        const int code0Y = waveTop + wavePlotH - 1;
-        const int code255Y = waveTop;
-
-        addRect(
-                static_cast<float>(waveLeft),
-                static_cast<float>(code0Y),
-                static_cast<float>(wavePlotW),
-                1.0f,
-                separator
-        );
-        addRect(
-                static_cast<float>(waveLeft),
-                static_cast<float>(code255Y),
-                static_cast<float>(wavePlotW),
-                1.0f,
-                separator
-        );
-
-        addText(
-                waveLeft + wavePlotW - 28,
-                code255Y + 2,
-                "255",
-                axis,
-                1
-        );
-        addText(
-                waveLeft + wavePlotW - 10,
-                code0Y - 8,
-                "0",
-                axis,
-                1
-        );
 
 
         // RGB Parade grid/separators.  Keep the original 239x200 normalized
