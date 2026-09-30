@@ -52,6 +52,10 @@ public:
             EGLint surfaceHeight,
             const UiLayout& layout,
             const UiCanvasViewport& canvas,
+            bool calibrationEnabled,
+            int calibrationWidth,
+            int calibrationHeight,
+            bool calibrationLimited,
             int vectorColorimetry,
             GLuint vao);
 

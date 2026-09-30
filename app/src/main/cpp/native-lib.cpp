@@ -3924,6 +3924,8 @@ static void renderLoop(ANativeWindow* window)
 
 
     auto drawStartupUiShell = [&]() {
+        const calibration_profile::Profile startupCalibration =
+                calibration_profile::snapshot();
         glViewport(0, 0, width, height);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -3933,7 +3935,13 @@ static void renderLoop(ANativeWindow* window)
                 height,
                 uiLayout,
                 uiCanvas,
-                0,
+                startupCalibration.enabled,
+                startupCalibration.width,
+                startupCalibration.height,
+                startupCalibration.limitedInput,
+                startupCalibration.enabled
+                        ? startupCalibration.colorimetry
+                        : 0,
                 vao
         );
     };
@@ -4430,6 +4438,10 @@ static void renderLoop(ANativeWindow* window)
                 height,
                 uiLayout,
                 uiCanvas,
+                calibration.enabled,
+                calibration.width,
+                calibration.height,
+                calibration.limitedInput,
                 calibration.enabled ? calibration.colorimetry : 0,
                 vao
         );
@@ -4935,7 +4947,10 @@ Java_com_hev_uvcfieldmonitor_MainActivity_nativeConfigureCalibrationProfile(
         jfloatArray offsetArray,
         jintArray puArray,
         jboolean pqInput,
-        jint colorimetry)
+        jint colorimetry,
+        jint width,
+        jint height,
+        jboolean limitedInput)
 {
     if (matrixArray == nullptr || offsetArray == nullptr || puArray == nullptr ||
         env->GetArrayLength(matrixArray) != 9 ||
@@ -4955,6 +4970,9 @@ Java_com_hev_uvcfieldmonitor_MainActivity_nativeConfigureCalibrationProfile(
         return JNI_FALSE;
     }
     profile.enabled = true;
+    profile.width = static_cast<int>(width);
+    profile.height = static_cast<int>(height);
+    profile.limitedInput = limitedInput == JNI_TRUE;
     profile.pqInput = pqInput == JNI_TRUE;
     profile.colorimetry = static_cast<int>(colorimetry);
     calibration_profile::configure(profile);

@@ -1001,6 +1001,10 @@ void ScopeUi::drawOverlay(
         EGLint surfaceHeight,
         const UiLayout& layout,
         const UiCanvasViewport& canvas,
+        bool calibrationEnabled,
+        int calibrationWidth,
+        int calibrationHeight,
+        bool calibrationLimited,
         int vectorColorimetry,
         GLuint vao)
 {
@@ -1242,6 +1246,20 @@ void ScopeUi::drawOverlay(
                 1.0f
         };
 
+        const UiColor calibrationActive{
+                80.0f / 255.0f,
+                220.0f / 255.0f,
+                120.0f / 255.0f,
+                1.0f
+        };
+
+        const UiColor calibrationInactive{
+                92.0f / 255.0f,
+                98.0f / 255.0f,
+                102.0f / 255.0f,
+                1.0f
+        };
+
         const UiColor guide{
                 235.0f / 255.0f,
                 235.0f / 255.0f,
@@ -1283,13 +1301,72 @@ void ScopeUi::drawOverlay(
                 bar
         );
 
+        const int calibrationBadgeX = inputStatus.x + 12;
+        const int calibrationBadgeY = inputStatus.y + 6;
+        const int calibrationBadgeW = 26;
+        const int calibrationBadgeH = 16;
+        const UiColor& calibrationColor =
+                calibrationEnabled
+                        ? calibrationActive
+                        : calibrationInactive;
+
+        addRect(
+                static_cast<float>(calibrationBadgeX),
+                static_cast<float>(calibrationBadgeY),
+                static_cast<float>(calibrationBadgeW),
+                1.0f,
+                calibrationColor);
+        addRect(
+                static_cast<float>(calibrationBadgeX),
+                static_cast<float>(calibrationBadgeY + calibrationBadgeH - 1),
+                static_cast<float>(calibrationBadgeW),
+                1.0f,
+                calibrationColor);
+        addRect(
+                static_cast<float>(calibrationBadgeX),
+                static_cast<float>(calibrationBadgeY),
+                1.0f,
+                static_cast<float>(calibrationBadgeH),
+                calibrationColor);
+        addRect(
+                static_cast<float>(calibrationBadgeX + calibrationBadgeW - 1),
+                static_cast<float>(calibrationBadgeY),
+                1.0f,
+                static_cast<float>(calibrationBadgeH),
+                calibrationColor);
+
         addText(
-                inputStatus.x + 12,
-                inputStatus.y + 8,
-                "IN  UVC MJPEG  1280x720    60.00P    BT.2020    10-BIT",
-                previewText,
+                calibrationBadgeX + 4,
+                calibrationBadgeY + 4,
+                "CAL",
+                calibrationColor,
                 1
         );
+
+        if (calibrationEnabled) {
+            const char* colorimetryText =
+                    vectorColorimetry == 0 ? "BT.601" :
+                    vectorColorimetry == 2 ? "BT.2020" :
+                    "BT.709";
+            const char* rangeText =
+                    calibrationLimited ? "LIMITED" : "FULL";
+            char calibrationText[64] = {};
+            std::snprintf(
+                    calibrationText,
+                    sizeof(calibrationText),
+                    "%dx%d  %s  %s",
+                    calibrationWidth,
+                    calibrationHeight,
+                    colorimetryText,
+                    rangeText);
+            addText(
+                    calibrationBadgeX + calibrationBadgeW + 8,
+                    calibrationBadgeY + 4,
+                    calibrationText,
+                    calibrationActive,
+                    1
+            );
+        }
 
         addText(
                 runtimeStatus.x + 12,

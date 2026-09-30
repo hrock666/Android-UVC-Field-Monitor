@@ -9,6 +9,9 @@ struct Profile {
     std::array<float, 9> matrix{{1,0,0, 0,1,0, 0,0,1}};
     std::array<float, 3> offsetCode{{0,0,0}};
     std::array<int, 4> pu{{0,0,0,0}};
+    int width = 0;
+    int height = 0;
+    bool limitedInput = false;
     bool pqInput = false;
     int colorimetry = 1;  // 0=BT.601, 1=BT.709, 2=BT.2020
 };
