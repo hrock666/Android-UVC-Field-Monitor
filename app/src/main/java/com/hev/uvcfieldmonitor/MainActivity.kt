@@ -77,7 +77,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         offsetCode: FloatArray,
         pu: IntArray,
         pqInput: Boolean,
-        colorimetry: Int
+        colorimetry: Int,
+        width: Int,
+        height: Int,
+        limitedInput: Boolean
     ): Boolean
     external fun nativeDisableCalibrationProfile()
 
@@ -366,14 +369,25 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             )
             val pq = profile.getJSONObject("inputContract")
                 .getString("transferCharacteristics") == "PQ"
-            val colorimetry = when (profile.getJSONObject("inputContract")
-                .getString("colorimetry")) {
+            val inputContract = profile.getJSONObject("inputContract")
+            val colorimetry = when (inputContract.getString("colorimetry")) {
                 "BT601" -> 0
                 "BT709" -> 1
                 "BT2020" -> 2
                 else -> error("Colorimetry")
             }
-            require(nativeConfigureCalibrationProfile(matrix, offset, pu, pq, colorimetry)) {
+            val captureMode = profile.getJSONObject("captureMode")
+            val limitedInput = inputContract.getString("range") == "LIMITED"
+            require(nativeConfigureCalibrationProfile(
+                matrix,
+                offset,
+                pu,
+                pq,
+                colorimetry,
+                captureMode.getInt("width"),
+                captureMode.getInt("height"),
+                limitedInput
+            )) {
                 "Native profile configuration"
             }
             val quality = profile.getJSONObject("validation").getString("result")
