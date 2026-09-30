@@ -624,7 +624,11 @@ void main()
         intensity = density(d, vmax, 1.4);
     }
 
-    outColor = vec4(vec3(clamp(intensity, 0.0, 1.0)), 1.0);
+    if (intensity <= 0.0) {
+        discard;
+    }
+
+    outColor = vec4(vec3(1.0), clamp(intensity, 0.0, 1.0));
 }
 )";
 
@@ -954,7 +958,10 @@ void ScopeUi::drawVectorscope(
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, maximaSsbo);
     glUseProgram(vectorscopeRenderProgram_);
     glBindVertexArray(vao);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_BLEND);
 }
 
 void ScopeUi::drawOverlay(

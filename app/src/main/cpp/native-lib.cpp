@@ -4420,24 +4420,23 @@ static void renderLoop(ANativeWindow* window)
                 vao
         );
 
-        scopeUi.drawVectorscope(
-                scopeGpu.frontVectorscopeSsbo(),
-                scopeGpu.frontMaximaSsbo(),
-                scopeGpu.frontValid(),
-                vectorscopeViewport,
-                vao
-        );
-
-
         // Draw the grid, labels, safe guide and scope graticules before the
-        // waveform and parade so samples that coincide with a grid line
-        // remain visible.
+        // waveform, parade and vectorscope so samples that coincide with a
+        // grid line remain visible.
         scopeUi.drawOverlay(
                 uiFps,
                 width,
                 height,
                 uiLayout,
                 uiCanvas,
+                vao
+        );
+
+        scopeUi.drawVectorscope(
+                scopeGpu.frontVectorscopeSsbo(),
+                scopeGpu.frontMaximaSsbo(),
+                scopeGpu.frontValid(),
+                vectorscopeViewport,
                 vao
         );
 
