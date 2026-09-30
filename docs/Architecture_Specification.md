@@ -2,7 +2,7 @@
 
 ## Architecture Specification — Current Baseline
 
-**Revision:** 2026-09-27  
+**Revision:** 2026-09-30
 **Status:** MS2109 / MS2130 1280×720p60 MJPEG共通パイプライン統合版  
 **Primary implementation:** Native C++ / libusb / TurboJPEG / OpenGL ES
 
@@ -620,7 +620,7 @@ decoded YCbCr source-domain
       └─ Vectorscope
 ```
 
-Waveformではdecoded Y codeを0–255のまま保持する。
+Calibration Profile無効時、Waveformはdecoded Y codeを0–255のまま保持する。Profile有効時は補正後RGBからProfileのColorimetry係数でLumaを再生成する。
 
 ```text
 Y=16  -> bin 16
@@ -752,16 +752,20 @@ Scope computeがbusyの場合は今回の解析をskipし、前回完了結果�
 Y = 0..255
 ```
 
-BT.601 limited基準の表示目安：
+表示グリッドは入力Rangeによって動的変更せず、Full Range固定とする。
 
 ```text
-Y=16   ->   0 IRE
-Y=235  -> 100 IRE
-Y=0    -> 約 -7.3 IRE
-Y=255  -> 約109.1 IRE
+Left  : 0 / 25 / 50 / 75 / 100 %
+Right : code 0 / 64 / 128 / 191 / 255
 ```
 
 1280 source pixelを720 waveform X座標へdown-mapして表示する。
+
+表示密度は平方根変換とし、入力高と同じ720 samples / source columnを基準にする。
+
+```text
+intensity = sqrt(count / 720)
+```
 
 HDR/PQ時もWaveformはsource code geometryを維持する。
 
@@ -777,6 +781,8 @@ Parade plot : 224 × 161
 
 Tone Mapping後のPreview RGBを測定しない。
 
+R/G/Bごとにframe内最大binで正規化し、表示密度は平方根変換する。Graticuleを先に描き、Parade信号を最後に合成する。
+
 ---
 
 # 16. RGB Histogram
@@ -787,13 +793,15 @@ Tone Mapping後のPreview RGBを測定しない。
 
 R/G/B各channelをsource-domain RGBとして集計する。
 
+各channelを独立した最大binで正規化し、平方根密度で描画する。code 0と255はclipping binとして通常binより明るく表示する。
+
 HDR Preview用Tone Mapping後の値は使用しない。
 
 ---
 
 # 17. Vectorscope
 
-VectorscopeはRGB round-tripを行わず、source YCbCrのCb/Crを直接使用する。
+Calibration Profile無効時はsource YCbCrのCb/Crを使用する。Profile有効時は補正後RGBから色差を再生成し、ProfileのBT.601 / BT.709 / BT.2020係数を使用する。
 
 limited-range基準：
 
@@ -819,6 +827,8 @@ Cr = (code - 128) / 224
 - G
 - Y
 
+100% target geometryを維持し、target座標と測定座標は同じchroma scale 117を使用する。表示密度はframe内最大bin基準の平方根変換とする。Graticuleを先に描き、測定信号を最後に合成する。
+
 Mali-G57互換性のため、readonly SSBO elementを関数へ直接渡さず、一度local variableへコピーする。
 
 GLSL予約語との衝突も避ける。
@@ -834,8 +844,6 @@ ScopeはPreviewのcritical pathを待たせない。
 ```text
 Preview draw
     ↓
-eglPresentationTimeANDROID(now)
-    ↓
 eglSwapBuffers()
     ↓
 Scope fence poll
@@ -846,6 +854,8 @@ glFenceSync()
     ↓
 glFlush()
 ```
+
+`UVCFM_ENABLE_DIAGNOSTICS=ON`の場合だけ、swap直前に`eglPresentationTimeANDROID(now)`を追加し、frame timestampを追跡する。
 
 Front Buffer pathでも同じ思想を維持し、Preview present/submissionを優先する。
 
@@ -865,17 +875,18 @@ Front Buffer pathでも同じ思想を維持し、Preview present/submissionを�
 
 映像外へ置くもの：
 
-- Input device / source
-- Resolution
-- Frame rate
-- Matrix / Range
-- Bit depth
-- HDR / SDR mode
+- Calibration state
+- Profile resolution
+- Profile Colorimetry / FULL・LIMITED
 - CLEAN
 - UI FPS
 - Scope labels
 
+Profile未読込時はグレーのCAL badgeのみ表示する。読込時は緑の`CAL`とProfile parameterを表示する。固定のダミー入力文字列と画面下部の詳細Calibration状態表示は使用しない。ProfileのLOAD / UNLOADはAndroid常駐通知から行う。
+
 Landscape / Portrait双方で映像領域とscope panelを分離する。
+
+LandscapeではWaveformの直下に同幅のRGB Paradeを置き、その右列へVectorscopeとHistogramを配置する。Vectorscopeは不要な余白を除いた239×200基準で描画する。
 
 ---
 
@@ -890,8 +901,6 @@ GLES composition
       ↓
 EGLSurface
       ↓
-eglPresentationTimeANDROID(now)
-      ↓
 eglSwapBuffers()
       ↓
 SurfaceFlinger
@@ -899,7 +908,7 @@ SurfaceFlinger
 Display
 ```
 
-`EGL_ANDROID_get_frame_timestamps`が利用可能な端末では、
+Diagnostic buildで`EGL_ANDROID_get_frame_timestamps`が利用可能な端末では、
 
 - COMPOSITE_DEADLINE
 - COMPOSITE_INTERVAL
@@ -1009,14 +1018,23 @@ HDMI source内部生成遅延やcamera sensor exposureは含まない。
 
 # 23. Diagnostic / Logging
 
-通常運用ではLogcatを必要最小限に抑える。
-
-デフォルトで残すもの：
+Native診断機能はCMake optionで一括制御する。
 
 ```text
-ISO / BULK transport statistics
-TurboJPEG statistics
-warning / error
+UVCFM_ENABLE_DIAGNOSTICS=OFF  # default / field operation
+UVCFM_ENABLE_DIAGNOSTICS=ON   # development measurement
+```
+
+OFF時に停止するもの：
+
+```text
+EGL frame timestamps / compositor timing
+eglPresentationTimeANDROID diagnostic hint
+per-frame latency history
+ISO / BULK periodic statistics
+TurboJPEG timing samples
+Scope SSBO readback validation / periodic statistics
+Colorbar / Range diagnostic
 ```
 
 代表的なMJPEG decoder統計：
@@ -1034,16 +1052,7 @@ frameSlotDrop
 totalDecoded
 ```
 
-通常無効：
-
-- per-frame render latency
-- per-frame PRESENT timing
-- presentation JIT detail
-- scope queue periodic log
-- Colorbar diagnostic
-- Range diagnostic
-
-必要時のみdiagnostic flagで再有効化する。
+UVC PROBE / COMMITはUVC streaming protocolに必須であり診断機能ではないため、OFFでも実行する。EGL/GLES capability fallback、Shader compile/link確認、USB・decode・初期化失敗のエラーログも維持する。
 
 ---
 
@@ -1292,7 +1301,7 @@ MS2109-classについては一部Android hostでhardware依存のMJPEG decode er
 
 ```text
 Document : Android UVC Field Monitor Architecture Specification
-Revision : Current / 2026-09-27
+Revision : Current / 2026-09-30
 Baseline : Shared 720p60 MJPEG pipeline for MS2109 / MS2130
 Targets  : Android 13+ / A202ZT / Teclast P30T (Unisoc T7250)
 ```

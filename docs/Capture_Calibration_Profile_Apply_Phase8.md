@@ -20,9 +20,11 @@ Calibration Search、Matrix Solve、Patch RecognitionはField Monitorでは行�
 
 ## Import
 
-画面左上の`Import Profile`からJSONを選択する。正常なProfileはアプリ内部へAtomic Commitし、次回起動時に再読込する。接続済みDeviceがある場合はUSBセッションを開き直し、ProfileのPU値を適用する。
+Androidの常駐通知にある`LOAD`からJSONを選択する。正常なProfileはアプリ内部へAtomic Commitし、次回起動時に再読込する。接続済みDeviceがある場合はUSBセッションを開き直し、ProfileのPU値を適用する。
 
-`CALIBRATION_VALID`と`CALIBRATION_POOR_FIT`を適用対象とする。後者は画面上の状態表示に品質情報を残す。
+通知の`UNLOAD`は保存JSONを削除し、Native補正を無効化する。接続済みDeviceがある場合はUSBセッションを開き直し、Profileなしの状態を即時反映する。画面内にはImportボタンを設けない。
+
+`CALIBRATION_VALID`と`CALIBRATION_POOR_FIT`を適用対象とする。Profile未読込時はCAL badgeをグレー、読込時は緑の`CAL`と解像度、Colorimetry、FULL / LIMITEDを表示する。詳細な状態・エラー文字列を画面下部には表示せず、Logcatへ記録する。
 
 ## Matching
 
@@ -39,7 +41,7 @@ Calibration Search、Matrix Solve、Patch RecognitionはField Monitorでは行�
 - Colorimetryが`BT601`、`BT709`、`BT2020`のいずれか
 - Transfer Characteristicsが`SDR`または`PQ`
 
-不一致またはJSON不正時は`PROFILE_MODE_MISMATCH`または`PROFILE_INVALID`を表示し、PUとRGB補正を無効にする。推測、補間、部分適用は行わない。
+不一致またはJSON不正時はPUとRGB補正を無効にし、`PROFILE_MODE_MISMATCH`またはImport failureの詳細をLogcatへ記録する。推測、補間、部分適用は行わない。
 
 ## GPU適用
 

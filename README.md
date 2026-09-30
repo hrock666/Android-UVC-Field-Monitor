@@ -99,13 +99,21 @@ Scope側にはPQ EOTF / Tone Mappingを入れず、Capture補正後のcode-domai
 
 フィールドでの露出確認、レベル確認、色分布確認をAndroid端末単体で行うことを目的としています。
 
+- WaveformはFull Range固定で、左に`0 / 25 / 50 / 75 / 100 %`、右に`code 0 / 64 / 128 / 191 / 255`を表示
+- Waveform / RGB Parade / Vectorscopeは平方根密度表示。Waveformの密度基準は入力高と同じ720 sample
+- HistogramはR/G/Bチャンネル別の平方根表示で、code 0 / 255のクリッピングbinを強調
+- Vectorscopeは100% targetを維持し、ProfileのBT.601 / BT.709 / BT.2020色度係数を使用
+- Graticuleを先に、測定信号を最後に描画するため、交点でも信号を確認可能
+
 ---
 
 ## Capture Calibration Profile
 
 別APKのUVC Capture Calibrationが生成したProfile Format v1 JSONを読み込み、キャプチャデバイス固有のPU値とRGB補正を適用できます。
 
-画面左上の`Import Profile`を押し、Calibration AppからExportしたJSONを選択します。正常なProfileはアプリ内部へ保存され、次回起動時に再読込されます。
+Androidの常駐通知にある`LOAD`からCalibration AppがExportしたJSONを選択します。正常なProfileはアプリ内部へ保存され、次回起動時に再読込されます。通知の`UNLOAD`は保存Profileを削除し、補正を無効化します。画面内にImportボタンは置きません。
+
+Profile未読込時は画面上のCAL badgeをグレー表示します。正常に読み込まれると緑の`CAL` badgeとともに、Profileの解像度、Colorimetry、FULL / LIMITEDを表示します。
 
 ```text
 UVC Capture
@@ -139,7 +147,7 @@ Field MonitorではCalibration Search、Matrix Solve、Patch Recognitionを行�
 - Transfer Characteristicsが`SDR` / `PQ`
 - Validation Resultが`CALIBRATION_VALID`または`CALIBRATION_POOR_FIT`
 
-不一致時は補間や推測を行いません。画面へ`PROFILE_MODE_MISMATCH`を表示し、PU書込みとRGB補正を無効化します。JSONの構造や値が不正な場合は`PROFILE_INVALID`になります。
+不一致時は補間や推測を行わず、PU書込みとRGB補正を無効化します。詳細理由はLogcatへ記録し、画面下部へ詳細エラー文字列は表示しません。
 
 Input ContractはProfileを現在の運用モードとして採用する方式です。HDMI InfoFrameやHDR Static Metadataから入力信号を自動判定し、Profile記載値と照合する機能は現時点ではありません。Import前に、実際の送信側設定とProfileのInput Contractが一致していることを確認してください。
 
@@ -219,15 +227,13 @@ decode error frameはrendererへpublishせず、前回の正常表示を保持�
 
 ## Diagnostic / Logging
 
-通常運用ではLogcat出力を抑え、主に以下を残します。
+Native診断機能はCMakeの`UVCFM_ENABLE_DIAGNOSTICS`で一括制御し、通常ビルドでは`OFF`です。
 
 ```text
-USB transport statistics
-TurboJPEG statistics
-warning / error
+-DUVCFM_ENABLE_DIAGNOSTICS=ON
 ```
 
-per-frame latency、Presentation詳細、Scope queue、Colorbar / Range diagnosticは通常無効です。
+`OFF`ではEGL frame timestamp / presentation timing、USB・TurboJPEG周期統計、Scope SSBO readback検証、Colorbar / Range解析を実行しません。UVC PROBE / COMMIT、機能fallback、初期化失敗やtransport errorなど運用に必要な処理とエラーログは維持します。
 
 ---
 
@@ -440,6 +446,7 @@ UvcFieldMonitor/
 │  └─ src/main/
 │     └─ cpp/
 │        ├─ calibration_profile.cpp
+│        ├─ diagnostic_config.h
 │        ├─ uvc_device.cpp
 │        ├─ uvc_stream.cpp
 │        ├─ uvc_mjpeg_decoder.cpp
