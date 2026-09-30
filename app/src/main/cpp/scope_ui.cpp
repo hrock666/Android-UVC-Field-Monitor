@@ -436,8 +436,7 @@ float histogramDensity(uint count, uint channelMax)
         return 0.0;
     }
 
-    return log(1.0 + float(count)) /
-           log(1.0 + float(channelMax));
+    return sqrt(float(count) / float(channelMax));
 }
 
 void main()
