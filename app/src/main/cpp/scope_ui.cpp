@@ -320,6 +320,7 @@ void main()
     );
 
     vec3 color = vec3(0.0);
+    float intensity = 0.0;
 
     if (p.x >= LEFT &&
         p.x < LEFT + PLOT_W &&
@@ -337,19 +338,24 @@ void main()
         // 'readonly' access qualifier). Copy it to a local value first.
         uint vmax = maxima[1 + channel];
         float v = density(d, vmax, 1.3);
+        intensity = v;
 
         if (channel == 0) {
-            color = vec3(v, 0.0, 0.0);
+            color = vec3(1.0, 0.0, 0.0);
         }
         else if (channel == 1) {
-            color = vec3(0.0, v, 0.0);
+            color = vec3(0.0, 1.0, 0.0);
         }
         else {
-            color = vec3(0.0, 0.0, v);
+            color = vec3(0.0, 0.0, 1.0);
         }
     }
 
-    outColor = vec4(color, 1.0);
+    if (intensity <= 0.0) {
+        discard;
+    }
+
+    outColor = vec4(color, clamp(intensity, 0.0, 1.0));
 }
 )";
 
@@ -901,7 +907,10 @@ void ScopeUi::drawParade(
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, maximaSsbo);
     glUseProgram(paradeRenderProgram_);
     glBindVertexArray(vao);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_BLEND);
 }
 
 void ScopeUi::drawHistogram(

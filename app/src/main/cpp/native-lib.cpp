@@ -4412,14 +4412,6 @@ static void renderLoop(ANativeWindow* window)
 
         // Step 15.4: display the latest completed scope SSBOs.
         // ScopeUi never waits; ScopeGpu only exposes completed front data.
-        scopeUi.drawParade(
-                scopeGpu.frontParadeSsbo(),
-                scopeGpu.frontMaximaSsbo(),
-                scopeGpu.frontValid(),
-                paradeViewport,
-                vao
-        );
-
         scopeUi.drawHistogram(
                 scopeGpu.frontHistogramSsbo(),
                 scopeGpu.frontMaximaSsbo(),
@@ -4438,13 +4430,22 @@ static void renderLoop(ANativeWindow* window)
 
 
         // Draw the grid, labels, safe guide and scope graticules before the
-        // waveform so samples that coincide with a grid line remain visible.
+        // waveform and parade so samples that coincide with a grid line
+        // remain visible.
         scopeUi.drawOverlay(
                 uiFps,
                 width,
                 height,
                 uiLayout,
                 uiCanvas,
+                vao
+        );
+
+        scopeUi.drawParade(
+                scopeGpu.frontParadeSsbo(),
+                scopeGpu.frontMaximaSsbo(),
+                scopeGpu.frontValid(),
+                paradeViewport,
                 vao
         );
 
