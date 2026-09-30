@@ -3933,6 +3933,7 @@ static void renderLoop(ANativeWindow* window)
                 height,
                 uiLayout,
                 uiCanvas,
+                0,
                 vao
         );
     };
@@ -4429,6 +4430,7 @@ static void renderLoop(ANativeWindow* window)
                 height,
                 uiLayout,
                 uiCanvas,
+                calibration.enabled ? calibration.colorimetry : 0,
                 vao
         );
 

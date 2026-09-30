@@ -52,6 +52,7 @@ public:
             EGLint surfaceHeight,
             const UiLayout& layout,
             const UiCanvasViewport& canvas,
+            int vectorColorimetry,
             GLuint vao);
 
     void shutdown();

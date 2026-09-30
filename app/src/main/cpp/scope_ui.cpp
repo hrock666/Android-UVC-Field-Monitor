@@ -820,22 +820,30 @@ static const std::unordered_map<char, UiGlyph>& uiFont()
 
 struct VectorTargetUi {
     const char* label;
-    float cb;
-    float cr;
+    float r;
+    float g;
+    float b;
     UiColor color;
     int labelDx;
     int labelDy;
 };
 
 
-static constexpr VectorTargetUi kVectorTargets601Ui[] = {
-    {"R",  -0.1687359f,  0.5000000f, {1.0f, 80.0f/255.0f, 80.0f/255.0f, 1.0f}, -3, -11},
-    {"M",   0.3312641f,  0.4186876f, {1.0f, 80.0f/255.0f, 1.0f, 1.0f}, 5, -8},
-    {"B",   0.5000000f, -0.0813124f, {80.0f/255.0f, 120.0f/255.0f, 1.0f, 1.0f}, 6, -3},
-    {"CY",  0.1687359f, -0.5000000f, {80.0f/255.0f, 1.0f, 1.0f, 1.0f}, -5, 6},
-    {"G",  -0.3312641f, -0.4186876f, {80.0f/255.0f, 1.0f, 80.0f/255.0f, 1.0f}, -12, 5},
-    {"Y",  -0.5000000f,  0.0813124f, {1.0f, 1.0f, 80.0f/255.0f, 1.0f}, -12, -3},
+static constexpr VectorTargetUi kVectorTargetsUi[] = {
+    {"R",  1.0f, 0.0f, 0.0f, {1.0f, 80.0f/255.0f, 80.0f/255.0f, 1.0f}, -3, -11},
+    {"M",  1.0f, 0.0f, 1.0f, {1.0f, 80.0f/255.0f, 1.0f, 1.0f}, 5, -8},
+    {"B",  0.0f, 0.0f, 1.0f, {80.0f/255.0f, 120.0f/255.0f, 1.0f, 1.0f}, 6, -3},
+    {"CY", 0.0f, 1.0f, 1.0f, {80.0f/255.0f, 1.0f, 1.0f, 1.0f}, -5, 6},
+    {"G",  0.0f, 1.0f, 0.0f, {80.0f/255.0f, 1.0f, 80.0f/255.0f, 1.0f}, -12, 5},
+    {"Y",  1.0f, 1.0f, 0.0f, {1.0f, 1.0f, 80.0f/255.0f, 1.0f}, -12, -3},
 };
+
+static std::array<float, 3> vectorLumaCoefficients(int colorimetry)
+{
+    if (colorimetry == 0) return {0.2990f, 0.5870f, 0.1140f};
+    if (colorimetry == 2) return {0.2627f, 0.6780f, 0.0593f};
+    return {0.2126f, 0.7152f, 0.0722f};
+}
 
 }  // namespace
 
@@ -970,6 +978,7 @@ void ScopeUi::drawOverlay(
         EGLint surfaceHeight,
         const UiLayout& layout,
         const UiCanvasViewport& canvas,
+        int vectorColorimetry,
         GLuint vao)
 {
     std::vector<UiVertex> vertices;
@@ -1698,14 +1707,31 @@ void ScopeUi::drawOverlay(
                 128.0f *
                 vectorScaleToPanel;
 
+        const std::array<float, 3> vectorCoefficients =
+                vectorLumaCoefficients(vectorColorimetry);
+        const float vectorKr = vectorCoefficients[0];
+        const float vectorKg = vectorCoefficients[1];
+        const float vectorKb = vectorCoefficients[2];
+
         for (const auto& target :
-             kVectorTargets601Ui) {
+             kVectorTargetsUi) {
+
+            const float targetLuma =
+                    target.r * vectorKr +
+                    target.g * vectorKg +
+                    target.b * vectorKb;
+            const float targetCb =
+                    (target.b - targetLuma) /
+                    (2.0f * (1.0f - vectorKb));
+            const float targetCr =
+                    (target.r - targetLuma) /
+                    (2.0f * (1.0f - vectorKr));
 
             const int tx =
                     static_cast<int>(
                             std::lround(
                                     vectorCx +
-                                    target.cb *
+                                    targetCb *
                                     vectorScale
                             )
                     );
@@ -1714,7 +1740,7 @@ void ScopeUi::drawOverlay(
                     static_cast<int>(
                             std::lround(
                                     vectorCy -
-                                    target.cr *
+                                    targetCr *
                                     vectorScale
                             )
                     );
