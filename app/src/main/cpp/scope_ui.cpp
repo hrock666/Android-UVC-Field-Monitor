@@ -158,17 +158,14 @@ void main()
         float xCount = float(x1 - x0 + 1);
 
         // Horizontal downsampling combines 2-3 source columns. Normalize
-        // that grouping so the density scale remains approximately 0..480
-        // samples per original column.
+        // that grouping so density remains expressed as samples per original
+        // source column, whose full vertical population is 720 samples.
         float count = float(sum) / max(xCount, 1.0);
 
-        const float gain = 1.3;
-        const float maxCount = 480.0;
+        const float maxCount = 720.0;
 
         if (count > 0.0) {
-            intensity =
-                log(1.0 + count * gain) /
-                log(1.0 + maxCount * gain);
+            intensity = sqrt(count / maxCount);
         }
     }
 
@@ -293,14 +290,13 @@ layout(std430, binding = 4) readonly buffer MaximaBuffer {
 
 out vec4 outColor;
 
-float density(uint v, uint vmax, float gain)
+float density(uint v, uint vmax)
 {
     if (v == 0u || vmax == 0u) {
         return 0.0;
     }
 
-    return log(1.0 + float(v) * gain) /
-           log(1.0 + float(vmax) * gain);
+    return sqrt(float(v) / float(vmax));
 }
 
 void main()
@@ -337,7 +333,7 @@ void main()
         // element directly as a function argument (S0001: discards
         // 'readonly' access qualifier). Copy it to a local value first.
         uint vmax = maxima[1 + channel];
-        float v = density(d, vmax, 1.3);
+        float v = density(d, vmax);
         intensity = v;
 
         if (channel == 0) {
@@ -585,14 +581,13 @@ layout(std430, binding = 4) readonly buffer MaximaBuffer {
 
 out vec4 outColor;
 
-float density(uint v, uint vmax, float gain)
+float density(uint v, uint vmax)
 {
     if (v == 0u || vmax == 0u) {
         return 0.0;
     }
 
-    return log(1.0 + float(v) * gain) /
-           log(1.0 + float(vmax) * gain);
+    return sqrt(float(v) / float(vmax));
 }
 
 void main()
@@ -644,7 +639,7 @@ void main()
         // Mali-G57: same readonly-SSBO qualifier workaround as Parade
         // and Histogram. Pass a plain local value to density().
         uint vmax = maxima[7];
-        intensity = density(d, vmax, 1.4);
+        intensity = density(d, vmax);
     }
 
     if (intensity <= 0.0) {
