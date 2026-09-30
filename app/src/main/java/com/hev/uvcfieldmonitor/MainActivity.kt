@@ -2,6 +2,8 @@ package com.hev.uvcfieldmonitor
 
 import android.Manifest
 import android.app.Activity
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -16,7 +18,6 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.view.Gravity
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -24,9 +25,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.TextView
 import org.json.JSONObject
 import java.io.FileOutputStream
 import java.nio.file.AtomicMoveNotSupportedException
@@ -42,9 +41,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
         private const val ACTION_USB_PERMISSION =
             "com.hev.uvcfieldmonitor.USB_PERMISSION"
+        private const val ACTION_LOAD_PROFILE =
+            "com.hev.uvcfieldmonitor.LOAD_PROFILE"
+        private const val ACTION_UNLOAD_PROFILE =
+            "com.hev.uvcfieldmonitor.UNLOAD_PROFILE"
 
         private const val REQUEST_CAMERA_PERMISSION = 1001
         private const val REQUEST_PROFILE_DOCUMENT = 1002
+        private const val REQUEST_NOTIFICATION_PERMISSION = 1003
+        private const val PROFILE_NOTIFICATION_ID = 2001
+        private const val PROFILE_NOTIFICATION_CHANNEL = "calibration_profile"
 
         init {
             System.loadLibrary("uvcfieldmonitor")
@@ -53,7 +59,6 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
 
     private lateinit var surfaceView: SurfaceView
-    private lateinit var profileStatusView: TextView
 
     private lateinit var usbManager: UsbManager
 
@@ -176,32 +181,6 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
-        val importButton = Button(this).apply {
-            text = "Import Profile"
-            setOnClickListener { selectCalibrationProfile() }
-        }
-        root.addView(
-            importButton,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP or Gravity.START
-            )
-        )
-        profileStatusView = TextView(this).apply {
-            setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0x99000000.toInt())
-            setPadding(16, 8, 16, 8)
-            text = "Calibration: disabled"
-        }
-        root.addView(
-            profileStatusView,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.START
-            )
-        )
         setContentView(root)
 
 
@@ -218,9 +197,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             ) as UsbManager
 
         loadedProfile = loadSavedCalibrationProfile()
-        if (loadedProfile != null) {
-            profileStatusView.text = "Calibration profile loaded; waiting for device match"
-        }
+        createProfileNotificationChannel()
+        updateProfileNotification()
+        handleProfileNotificationAction(intent)
 
 
         registerUsbPermissionReceiver()
@@ -237,6 +216,113 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
 
         ensureCameraPermissionThenScanUsb()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleProfileNotificationAction(intent)
+    }
+
+    private fun handleProfileNotificationAction(intent: Intent?) {
+        val action = intent?.action
+        intent?.action = null
+        when (action) {
+            ACTION_LOAD_PROFILE -> selectCalibrationProfile()
+            ACTION_UNLOAD_PROFILE -> unloadCalibrationProfile()
+        }
+    }
+
+    private fun unloadCalibrationProfile() {
+        loadedProfile = null
+        if (!profileFile().delete() && profileFile().exists()) {
+            Log.e(TAG, "Failed to delete saved calibration profile")
+        }
+        nativeDisableCalibrationProfile()
+        val device = selectedUsbDevice
+        if (device != null && usbManager.hasPermission(device)) {
+            openUsbDevice(device)
+        }
+        updateProfileNotification()
+    }
+
+    private fun createProfileNotificationChannel() {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(
+            NotificationChannel(
+                PROFILE_NOTIFICATION_CHANNEL,
+                "Calibration profile",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Calibration profile load status and controls"
+                setShowBadge(false)
+            }
+        )
+    }
+
+    private fun updateProfileNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        fun activityIntent(action: String?, requestCode: Int): PendingIntent {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                this.action = action
+                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            return PendingIntent.getActivity(
+                this,
+                requestCode,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        }
+
+        val notification = android.app.Notification.Builder(
+            this,
+            PROFILE_NOTIFICATION_CHANNEL
+        )
+            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setContentTitle("UVC Field Monitor")
+            .setContentText(
+                if (loadedProfile != null) "Calibration profile loaded"
+                else "Calibration profile not loaded"
+            )
+            .setContentIntent(activityIntent(null, 0))
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(android.app.Notification.CATEGORY_STATUS)
+            .addAction(
+                android.R.drawable.ic_menu_upload,
+                "LOAD",
+                activityIntent(ACTION_LOAD_PROFILE, 1)
+            )
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "UNLOAD",
+                activityIntent(ACTION_UNLOAD_PROFILE, 2)
+            )
+            .build()
+
+        getSystemService(NotificationManager::class.java)
+            .notify(PROFILE_NOTIFICATION_ID, notification)
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_NOTIFICATION_PERMISSION
+            )
+        } else {
+            updateProfileNotification()
+        }
     }
 
     private fun selectCalibrationProfile() {
@@ -261,14 +347,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             validateProfileStructure(profile)
             saveCalibrationProfile(json)
             loadedProfile = profile
-            profileStatusView.text = "Profile imported; checking current device"
+            updateProfileNotification()
             val device = selectedUsbDevice
             if (device != null && usbManager.hasPermission(device)) {
                 openUsbDevice(device)
             }
         } catch (error: Exception) {
             nativeDisableCalibrationProfile()
-            profileStatusView.text = "PROFILE_INVALID: ${error.message}"
+            updateProfileNotification()
             Log.e(TAG, "Profile import failed", error)
         }
     }
@@ -337,7 +423,6 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun configureProfileForDevice(device: UsbDevice): Boolean {
         val profile = loadedProfile ?: run {
             nativeDisableCalibrationProfile()
-            profileStatusView.text = "Calibration: disabled (no profile)"
             return false
         }
         return try {
@@ -391,12 +476,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 "Native profile configuration"
             }
             val quality = profile.getJSONObject("validation").getString("result")
-            profileStatusView.text = "Calibration: enabled ($quality)"
             Log.i(TAG, "Phase 8 profile match: enabled ($quality)")
             true
         } catch (error: Exception) {
             nativeDisableCalibrationProfile()
-            profileStatusView.text = "PROFILE_MODE_MISMATCH: ${error.message}; calibration disabled"
             Log.w(TAG, "PROFILE_MODE_MISMATCH: ${error.message}")
             false
         }
@@ -590,6 +673,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             )
 
             scanUsbDevices()
+            requestNotificationPermissionIfNeeded()
 
             return
         }
@@ -623,12 +707,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         )
 
 
-        if (
-            requestCode !=
-            REQUEST_CAMERA_PERMISSION
-        ) {
+        if (requestCode == REQUEST_NOTIFICATION_PERMISSION) {
+            updateProfileNotification()
             return
         }
+
+        if (requestCode != REQUEST_CAMERA_PERMISSION) return
 
 
         if (
@@ -651,6 +735,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 "CAMERA permission DENIED"
             )
         }
+
+        requestNotificationPermissionIfNeeded()
     }
 
 
