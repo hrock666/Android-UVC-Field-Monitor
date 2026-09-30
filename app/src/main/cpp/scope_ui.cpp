@@ -1704,7 +1704,7 @@ void ScopeUi::drawOverlay(
         );
 
         const float vectorScale =
-                128.0f *
+                117.0f *
                 vectorScaleToPanel;
 
         const std::array<float, 3> vectorCoefficients =

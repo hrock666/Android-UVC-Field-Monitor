@@ -289,8 +289,8 @@ void main()
         cr = (cr8 - 128.0) / 224.0;
     }
 
-    int gx = int(round(cb * 128.0 + 70.0));
-    int gy = int(round(-cr * 128.0 + 70.0));
+    int gx = int(round(cb * 117.0 + 70.0));
+    int gy = int(round(-cr * 117.0 + 70.0));
 
     if (gx >= 0 && gx < 141 && gy >= 0 && gy < 141) {
         bumpVector(gy * 141 + gx);
