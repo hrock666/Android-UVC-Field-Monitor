@@ -49,6 +49,19 @@ bool waitForDecodedFrame(
         uint64_t& outReadySequence,
         int timeoutMs);
 
+// Wait for either a newer decoded frame or an external render-only event.
+// UI input uses the external wake path so the renderer can refresh without
+// uploading or queueing another camera frame.
+bool waitForDecodedFrameOrRenderWake(
+        uint64_t afterFrameSequence,
+        uint64_t afterRenderWakeSequence,
+        uint64_t& outReadyFrameSequence,
+        uint64_t& outRenderWakeSequence,
+        int timeoutMs);
+
+uint64_t currentRenderWakeSequence();
+void notifyRenderWake();
+
 // Copy the newest planar frame into dst as one contiguous buffer:
 //   [Y 1280x720][Cb 640x720][Cr 640x720]
 // No RGB conversion is performed on the CPU.

@@ -136,7 +136,10 @@ app/src/main/cpp/monitor_ui_state.h
 app/src/main/cpp/monitor_ui_controller.h
 app/src/main/cpp/monitor_ui_controller.cpp
     state transition、cycle、preset適用、effective state、status文字列
-    logical geometry、hit-test
+
+app/src/main/cpp/monitor_ui_geometry.h
+app/src/main/cpp/monitor_ui_geometry.cpp
+    MENU / Rail / Presetの共通logical geometry、表示情報、hit-test
 
 app/src/main/cpp/preview_assist.h
 app/src/main/cpp/preview_assist.cpp
@@ -551,8 +554,8 @@ Frame 2.39
 | Phase | 状態 | 備考 |
 |---|---|---|
 | UI-0 | 完了 | State / Controller、描画変更なし |
-| UI-1 | 実装済み・手動確認待ち | Frame CLEAN化、Runtime Assist Status接続 |
-| UI-2 | 未着手 | MENU / LOCK / Touch、D-12〜D-14／D-16決定済み |
+| UI-1 | 完了 | Frame CLEAN化、Runtime Assist Status接続 |
+| UI-2 | 実装済み・手動確認待ち | MENU / LOCK / Touch、UI-only redraw |
 | UI-3 | 未着手 | D-01〜D-04／D-18／D-19決定済み |
 | UI-4 | 未着手 | D-05〜D-07／D-19決定済み |
 | UI-5 | 未着手 | D-08〜D-09／D-19決定済み |

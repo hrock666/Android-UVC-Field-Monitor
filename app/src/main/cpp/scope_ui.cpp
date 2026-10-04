@@ -1,5 +1,6 @@
 #include "scope_ui.h"
 #include "monitor_ui_controller.h"
+#include "monitor_ui_geometry.h"
 
 #include <android/log.h>
 
@@ -1002,11 +1003,11 @@ void ScopeUi::drawOverlay(
         int calibrationHeight,
         bool calibrationLimited,
         int vectorColorimetry,
-        const MonitorUiRenderState& uiState,
+        const MonitorUiSnapshot& uiSnapshot,
         GLuint vao)
 {
     std::vector<UiVertex> vertices;
-    vertices.reserve(12000);
+    vertices.reserve(18000);
 
         vertices.clear();
 
@@ -1200,6 +1201,53 @@ void ScopeUi::drawOverlay(
             }
         };
 
+        const auto addBorder =
+                [&](const RectI& rect,
+                    const UiColor& color) {
+            addRect(
+                    static_cast<float>(rect.x),
+                    static_cast<float>(rect.y),
+                    static_cast<float>(rect.width),
+                    1.0f,
+                    color);
+            addRect(
+                    static_cast<float>(rect.x),
+                    static_cast<float>(rect.y + rect.height - 1),
+                    static_cast<float>(rect.width),
+                    1.0f,
+                    color);
+            addRect(
+                    static_cast<float>(rect.x),
+                    static_cast<float>(rect.y),
+                    1.0f,
+                    static_cast<float>(rect.height),
+                    color);
+            addRect(
+                    static_cast<float>(rect.x + rect.width - 1),
+                    static_cast<float>(rect.y),
+                    1.0f,
+                    static_cast<float>(rect.height),
+                    color);
+        };
+
+        const auto addCenteredText =
+                [&](const RectI& rect,
+                    const std::string& text,
+                    const UiColor& color,
+                    int scale) {
+            const int textWidth =
+                    text.empty()
+                    ? 0
+                    : static_cast<int>(text.size()) * 6 * scale - scale;
+            const int textHeight = 7 * scale;
+            addText(
+                    rect.x + (rect.width - textWidth) / 2,
+                    rect.y + (rect.height - textHeight) / 2,
+                    text,
+                    color,
+                    scale);
+        };
+
 
         const UiColor border{
                 65.0f / 255.0f,
@@ -1282,9 +1330,11 @@ void ScopeUi::drawOverlay(
         const RectI& histPanel = layout.histogram;
         const RectI& vectorPanel = layout.vectorscope;
         const EffectivePreviewState effective =
-                resolveEffectivePreviewState(uiState.assist);
+                resolveEffectivePreviewState(uiSnapshot.state.assist);
         const std::string runtimeAssistText =
                 buildRuntimeAssistText(effective);
+        const MonitorUiGeometry monitorGeometry =
+                calculateMonitorUiGeometry(layout, uiSnapshot);
 
         addRect(
                 static_cast<float>(inputStatus.x),
@@ -1351,17 +1401,32 @@ void ScopeUi::drawOverlay(
                     "BT.709";
             const char* rangeText =
                     calibrationLimited ? "LIMITED" : "FULL";
-            char calibrationText[64] = {};
+            char calibrationBuffer[64] = {};
             std::snprintf(
-                    calibrationText,
-                    sizeof(calibrationText),
+                    calibrationBuffer,
+                    sizeof(calibrationBuffer),
                     "%dx%d  %s  %s",
                     calibrationWidth,
                     calibrationHeight,
                     colorimetryText,
                     rangeText);
+            std::string calibrationText = calibrationBuffer;
+            const int calibrationTextX =
+                    calibrationBadgeX + calibrationBadgeW + 8;
+            const int calibrationTextRight =
+                    monitorGeometry.menuTrigger.x - 6;
+            const int maxCalibrationCharacters =
+                    std::max(
+                            0,
+                            (calibrationTextRight - calibrationTextX) / 6);
+            if (calibrationText.size() >
+                static_cast<std::size_t>(maxCalibrationCharacters)) {
+                calibrationText.resize(
+                        static_cast<std::size_t>(
+                                maxCalibrationCharacters));
+            }
             addText(
-                    calibrationBadgeX + calibrationBadgeW + 8,
+                    calibrationTextX,
                     calibrationBadgeY + 4,
                     calibrationText,
                     calibrationActive,
@@ -1903,9 +1968,143 @@ void ScopeUi::drawOverlay(
             );
         }
 
+        const std::size_t monitorForegroundStart = vertices.size();
+
+        // MENU controls are appended last in the UI vertex stream. Every
+        // panel color is opaque; selected items use white/black reversal.
+        const UiColor menuBlack{0.0f, 0.0f, 0.0f, 1.0f};
+        const UiColor menuWhite{1.0f, 1.0f, 1.0f, 1.0f};
+        const UiColor menuDim{0.45f, 0.45f, 0.45f, 1.0f};
+
+        addRect(
+                static_cast<float>(monitorGeometry.menuTrigger.x),
+                static_cast<float>(monitorGeometry.menuTrigger.y),
+                static_cast<float>(monitorGeometry.menuTrigger.width),
+                static_cast<float>(monitorGeometry.menuTrigger.height),
+                menuBlack);
+        addBorder(monitorGeometry.menuTrigger, menuWhite);
+        addCenteredText(
+                monitorGeometry.menuTrigger,
+                uiSnapshot.state.menu.menuOpen ? "CLOSE" : "MENU",
+                menuWhite,
+                1);
+
+        if (monitorGeometry.railVisible) {
+            for (const MonitorFunctionButtonGeometry& button :
+                 monitorGeometry.functionButtons) {
+                const UiColor& background =
+                        button.selected ? menuWhite : menuBlack;
+                const UiColor& foreground =
+                        button.selected
+                        ? menuBlack
+                        : (button.enabled ? menuWhite : menuDim);
+
+                addRect(
+                        static_cast<float>(button.rect.x),
+                        static_cast<float>(button.rect.y),
+                        static_cast<float>(button.rect.width),
+                        static_cast<float>(button.rect.height),
+                        background);
+                addBorder(button.rect, foreground);
+
+                const RectI keyLine{
+                        button.rect.x,
+                        button.rect.y + 5,
+                        button.rect.width,
+                        7,
+                };
+                const RectI nameLine{
+                        button.rect.x,
+                        button.rect.y + 23,
+                        button.rect.width,
+                        7,
+                };
+                const RectI valueLine{
+                        button.rect.x,
+                        button.rect.y + 41,
+                        button.rect.width,
+                        7,
+                };
+                addCenteredText(keyLine, button.keyText, foreground, 1);
+                addCenteredText(nameLine, button.nameText, foreground, 1);
+                addCenteredText(valueLine, button.valueText, foreground, 1);
+            }
+
+            addRect(
+                    static_cast<float>(monitorGeometry.lockButton.x),
+                    static_cast<float>(monitorGeometry.lockButton.y),
+                    static_cast<float>(monitorGeometry.lockButton.width),
+                    static_cast<float>(monitorGeometry.lockButton.height),
+                    menuBlack);
+            addBorder(monitorGeometry.lockButton, menuWhite);
+            const RectI lockNameLine{
+                    monitorGeometry.lockButton.x,
+                    monitorGeometry.lockButton.y + 11,
+                    monitorGeometry.lockButton.width,
+                    7,
+            };
+            const RectI lockValueLine{
+                    monitorGeometry.lockButton.x,
+                    monitorGeometry.lockButton.y + 37,
+                    monitorGeometry.lockButton.width,
+                    7,
+            };
+            addCenteredText(lockNameLine, "LOCK", menuWhite, 1);
+            addCenteredText(
+                    lockValueLine,
+                    uiSnapshot.state.menu.locked ? "ON" : "OFF",
+                    menuWhite,
+                    1);
+        }
+
+        if (monitorGeometry.presetVisible) {
+            addRect(
+                    static_cast<float>(monitorGeometry.presetPanel.x),
+                    static_cast<float>(monitorGeometry.presetPanel.y),
+                    static_cast<float>(monitorGeometry.presetPanel.width),
+                    static_cast<float>(monitorGeometry.presetPanel.height),
+                    menuBlack);
+            addBorder(monitorGeometry.presetTitleRect, menuWhite);
+            addCenteredText(
+                    monitorGeometry.presetTitleRect,
+                    monitorGeometry.presetTitle,
+                    menuWhite,
+                    1);
+
+            for (std::size_t index = 0;
+                 index < monitorGeometry.presetRowCount;
+                 ++index) {
+                const MonitorPresetRowGeometry& row =
+                        monitorGeometry.presetRows[index];
+                const UiColor& background =
+                        row.selected ? menuWhite : menuBlack;
+                const UiColor& foreground =
+                        row.selected
+                        ? menuBlack
+                        : (row.enabled ? menuWhite : menuDim);
+
+                addRect(
+                        static_cast<float>(row.rect.x),
+                        static_cast<float>(row.rect.y),
+                        static_cast<float>(row.rect.width),
+                        static_cast<float>(row.rect.height),
+                        background);
+                addBorder(row.rect, foreground);
+                addCenteredText(row.rect, row.text, foreground, 1);
+            }
+        }
+
         if (vertices.empty()) {
+            monitorForegroundFirst_ = 0;
+            monitorForegroundCount_ = 0;
             return;
         }
+
+        monitorForegroundFirst_ =
+                static_cast<GLint>(monitorForegroundStart);
+        monitorForegroundCount_ =
+                static_cast<GLsizei>(
+                        vertices.size() - monitorForegroundStart);
 
 
         glViewport(
@@ -1969,13 +2168,12 @@ void ScopeUi::drawOverlay(
                 )
         );
 
-        glDrawArrays(
-                GL_TRIANGLES,
-                0,
-                static_cast<GLsizei>(
-                        vertices.size()
-                )
-        );
+        if (monitorForegroundFirst_ > 0) {
+            glDrawArrays(
+                    GL_TRIANGLES,
+                    0,
+                    monitorForegroundFirst_);
+        }
 
         glDisable(GL_BLEND);
 
@@ -1983,6 +2181,47 @@ void ScopeUi::drawOverlay(
                 GL_ARRAY_BUFFER,
                 0
         );
+}
+
+void ScopeUi::drawMonitorForeground(
+        EGLint surfaceWidth,
+        EGLint surfaceHeight,
+        GLuint vao) const
+{
+    if (uiProgram_ == 0 ||
+        uiVbo_ == 0 ||
+        monitorForegroundCount_ <= 0) {
+        return;
+    }
+
+    glViewport(0, 0, surfaceWidth, surfaceHeight);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(uiProgram_);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, uiVbo_);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(
+            0,
+            2,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(UiVertex),
+            reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+            1,
+            4,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(UiVertex),
+            reinterpret_cast<void*>(sizeof(float) * 2));
+    glDrawArrays(
+            GL_TRIANGLES,
+            monitorForegroundFirst_,
+            monitorForegroundCount_);
+    glDisable(GL_BLEND);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void ScopeUi::shutdown()
@@ -2016,6 +2255,9 @@ void ScopeUi::shutdown()
         glDeleteBuffers(1, &uiVbo_);
         uiVbo_ = 0;
     }
+
+    monitorForegroundFirst_ = 0;
+    monitorForegroundCount_ = 0;
 }
 
 }  // namespace field_monitor

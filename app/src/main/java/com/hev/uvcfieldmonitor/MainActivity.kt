@@ -18,6 +18,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -75,6 +76,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
 
     external fun nativeSetSurface(surface: Surface?)
+    external fun nativeOnSurfaceTap(x: Float, y: Float)
     external fun nativeOpenUsb(fd: Int): Boolean
     external fun nativeCloseUsb()
     external fun nativeConfigureCalibrationProfile(
@@ -172,6 +174,21 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             SurfaceView(this)
 
         surfaceView.holder.addCallback(this)
+        surfaceView.isClickable = true
+        surfaceView.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> true
+
+                MotionEvent.ACTION_UP -> {
+                    nativeOnSurfaceTap(event.x, event.y)
+                    view.performClick()
+                    true
+                }
+
+                MotionEvent.ACTION_CANCEL -> true
+                else -> true
+            }
+        }
 
         val root = FrameLayout(this)
         root.addView(

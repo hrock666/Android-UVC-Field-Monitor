@@ -17,6 +17,7 @@
 #include "uvc_mjpeg_decoder.h"
 #include "field_monitor_layout.h"
 #include "monitor_ui_controller.h"
+#include "monitor_ui_geometry.h"
 #include "scope_ui.h"
 #include "scope_gpu.h"
 #include "diagnostic_config.h"
@@ -36,6 +37,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstdio>
+#include <deque>
 #include <string>
 #include <unordered_map>
 
@@ -323,6 +325,15 @@ static std::thread gRenderThread;
 static std::atomic<bool> gRunning{false};
 static ANativeWindow* gWindow = nullptr;
 
+struct PendingSurfaceTap {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+static std::mutex gUiInputMutex;
+static std::deque<PendingSurfaceTap> gPendingSurfaceTaps;
+static constexpr size_t MAX_PENDING_SURFACE_TAPS = 32;
+
 using field_monitor::UiCanvasViewport;
 using field_monitor::UiLayout;
 using field_monitor::UiLayoutMode;
@@ -331,6 +342,205 @@ using field_monitor::aspectFitRect;
 using field_monitor::calculateUiCanvasViewport;
 using field_monitor::selectUiLayout;
 using field_monitor::uiLogicalRectToViewport;
+
+static void enqueueSurfaceTap(float x, float y)
+{
+    if (!std::isfinite(x) || !std::isfinite(y)) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gUiInputMutex);
+        if (gPendingSurfaceTaps.size() >= MAX_PENDING_SURFACE_TAPS) {
+            gPendingSurfaceTaps.pop_front();
+        }
+        gPendingSurfaceTaps.push_back({x, y});
+    }
+
+    uvc_mjpeg_decoder::notifyRenderWake();
+}
+
+static std::deque<PendingSurfaceTap> takePendingSurfaceTaps()
+{
+    std::deque<PendingSurfaceTap> pending;
+    std::lock_guard<std::mutex> lock(gUiInputMutex);
+    pending.swap(gPendingSurfaceTaps);
+    return pending;
+}
+
+static bool applyMonitorPresetAction(
+        field_monitor::MonitorUiController& controller,
+        field_monitor::MonitorPresetAction action)
+{
+    using field_monitor::FalseColorMode;
+    using field_monitor::FrameAspect;
+    using field_monitor::MonitorPresetAction;
+    using field_monitor::PeakingPreset;
+    using field_monitor::ZebraPreset;
+
+    switch (action) {
+    case MonitorPresetAction::ZebraOff:
+        return controller.selectZebraPreset(ZebraPreset::Off);
+    case MonitorPresetAction::Zebra70:
+        return controller.selectZebraPreset(ZebraPreset::Ire70);
+    case MonitorPresetAction::Zebra80:
+        return controller.selectZebraPreset(ZebraPreset::Ire80);
+    case MonitorPresetAction::Zebra90:
+        return controller.selectZebraPreset(ZebraPreset::Ire90);
+    case MonitorPresetAction::Zebra95:
+        return controller.selectZebraPreset(ZebraPreset::Ire95);
+    case MonitorPresetAction::Zebra100:
+        return controller.selectZebraPreset(ZebraPreset::Ire100);
+
+    case MonitorPresetAction::PeakingOff:
+        return controller.selectPeakingPreset(PeakingPreset::Off);
+    case MonitorPresetAction::PeakingLow:
+        return controller.selectPeakingPreset(PeakingPreset::Low);
+    case MonitorPresetAction::PeakingMid:
+        return controller.selectPeakingPreset(PeakingPreset::Mid);
+    case MonitorPresetAction::PeakingHigh:
+        return controller.selectPeakingPreset(PeakingPreset::High);
+    case MonitorPresetAction::PeakingMonoLow:
+        return controller.selectPeakingPreset(PeakingPreset::MonoLow);
+    case MonitorPresetAction::PeakingMonoMid:
+        return controller.selectPeakingPreset(PeakingPreset::MonoMid);
+    case MonitorPresetAction::PeakingMonoHigh:
+        return controller.selectPeakingPreset(PeakingPreset::MonoHigh);
+
+    case MonitorPresetAction::FalseColorOff:
+        return controller.selectFalseColorMode(FalseColorMode::Off);
+    case MonitorPresetAction::FalseColorVideo:
+        return controller.selectFalseColorMode(FalseColorMode::VideoLevel);
+    case MonitorPresetAction::FalseColorHdrNits:
+        return controller.selectFalseColorMode(FalseColorMode::HdrNits);
+
+    case MonitorPresetAction::FrameOff:
+        return controller.selectFrameOff();
+    case MonitorPresetAction::Frame16x9:
+        return controller.selectFrameAspect(FrameAspect::Ratio16x9);
+    case MonitorPresetAction::Frame1_85:
+        return controller.selectFrameAspect(FrameAspect::Ratio1_85);
+    case MonitorPresetAction::Frame2_00:
+        return controller.selectFrameAspect(FrameAspect::Ratio2_00);
+    case MonitorPresetAction::Frame2_39:
+        return controller.selectFrameAspect(FrameAspect::Ratio2_39);
+    case MonitorPresetAction::Frame4x3:
+        return controller.selectFrameAspect(FrameAspect::Ratio4x3);
+    case MonitorPresetAction::Frame1x1:
+        return controller.selectFrameAspect(FrameAspect::Ratio1x1);
+    case MonitorPresetAction::Frame9x16:
+        return controller.selectFrameAspect(FrameAspect::Ratio9x16);
+    case MonitorPresetAction::ToggleCross:
+        return controller.toggleCenterCross();
+    case MonitorPresetAction::ToggleSafe:
+        return controller.toggleSafeArea();
+
+    case MonitorPresetAction::None:
+    default:
+        return false;
+    }
+}
+
+static bool processSurfaceTap(
+        const PendingSurfaceTap& tap,
+        EGLint surfaceHeight,
+        const UiLayout& layout,
+        const UiCanvasViewport& canvas,
+        field_monitor::MonitorUiController& controller)
+{
+    const float canvasSurfaceTop =
+            static_cast<float>(
+                    surfaceHeight - canvas.y - canvas.height);
+    const bool insideCanvas =
+            tap.x >= static_cast<float>(canvas.x) &&
+            tap.y >= canvasSurfaceTop &&
+            tap.x < static_cast<float>(canvas.x + canvas.width) &&
+            tap.y < canvasSurfaceTop + static_cast<float>(canvas.height) &&
+            canvas.scale > 0.0f;
+
+    if (!insideCanvas) {
+        return controller.tapOutsideMenuUi();
+    }
+
+    const float logicalX =
+            (tap.x - static_cast<float>(canvas.x)) / canvas.scale;
+    const float logicalY =
+            (tap.y - canvasSurfaceTop) / canvas.scale;
+
+    const field_monitor::MonitorUiSnapshot snapshot = controller.snapshot();
+    const field_monitor::MonitorUiGeometry geometry =
+            field_monitor::calculateMonitorUiGeometry(layout, snapshot);
+
+    if (field_monitor::monitorRectContains(
+            geometry.menuTrigger, logicalX, logicalY)) {
+        return controller.toggleMenu();
+    }
+
+    if (!geometry.railVisible) {
+        return false;
+    }
+
+    if (geometry.presetVisible) {
+        for (std::size_t index = 0;
+             index < geometry.presetRowCount;
+             ++index) {
+            const field_monitor::MonitorPresetRowGeometry& row =
+                    geometry.presetRows[index];
+            if (field_monitor::monitorRectContains(
+                    row.rect, logicalX, logicalY)) {
+                return
+                        row.enabled &&
+                        applyMonitorPresetAction(controller, row.action);
+            }
+        }
+
+        if (field_monitor::monitorRectContains(
+                geometry.presetPanel, logicalX, logicalY)) {
+            return false;
+        }
+    }
+
+    if (field_monitor::monitorRectContains(
+            geometry.lockButton, logicalX, logicalY)) {
+        return controller.toggleLock();
+    }
+
+    for (const field_monitor::MonitorFunctionButtonGeometry& button :
+         geometry.functionButtons) {
+        if (field_monitor::monitorRectContains(
+                button.rect, logicalX, logicalY)) {
+            return button.enabled && controller.tapFunction(button.key);
+        }
+    }
+
+    if (field_monitor::monitorRectContains(
+            geometry.functionRail, logicalX, logicalY)) {
+        return false;
+    }
+
+    return controller.tapOutsideMenuUi();
+}
+
+static bool processPendingSurfaceTaps(
+        EGLint surfaceHeight,
+        const UiLayout& layout,
+        const UiCanvasViewport& canvas,
+        field_monitor::MonitorUiController& controller)
+{
+    bool changed = false;
+    std::deque<PendingSurfaceTap> pending = takePendingSurfaceTaps();
+    for (const PendingSurfaceTap& tap : pending) {
+        changed =
+                processSurfaceTap(
+                        tap,
+                        surfaceHeight,
+                        layout,
+                        canvas,
+                        controller) ||
+                changed;
+    }
+    return changed;
+}
 
 static constexpr int PLANAR_MJPEG_FRAME_W = 1280;
 static constexpr int PLANAR_MJPEG_FRAME_H = 720;
@@ -3955,9 +4165,10 @@ static void renderLoop(ANativeWindow* window)
                 startupCalibration.enabled
                         ? startupCalibration.colorimetry
                         : 0,
-                uiSnapshot.state,
+                uiSnapshot,
                 vao
         );
+        scopeUi.drawMonitorForeground(width, height, vao);
     };
 
 
@@ -4010,10 +4221,12 @@ static void renderLoop(ANativeWindow* window)
     // Step 14: event-driven render loop
     //
     // UVC FRAME READY
-    //   -> condition-variable wake
     //   -> copy newest frame only
     //   -> upload / draw / present once (SurfaceControl FRONT or EGL swap)
-    //   -> sleep until the next UVC publication
+    // UI STATE DIRTY
+    //   -> reuse the latest uploaded textures
+    //   -> draw / present once without camera upload or scope compute
+    // Both sources wake the same condition-variable wait.
     //
     // No duplicate redraw/swap of the same camera frame.
     // No video FIFO.
@@ -4033,7 +4246,7 @@ static void renderLoop(ANativeWindow* window)
 
     LOGI(
             "Step 14: event-driven renderer active; "
-            "present only on new UVC frame"
+            "present on new UVC frame or UI state change"
     );
 
     LOGI(
@@ -4058,9 +4271,167 @@ static void renderLoop(ANativeWindow* window)
     uint64_t uiFpsWindowStartNs =
             nowMonotonicRawNs();
 
+    bool haveUploadedFrame = false;
+    uint64_t lastRenderedUiRevision =
+            monitorUi.snapshot().revision;
+    uint64_t lastRenderWakeSequence =
+            uvc_mjpeg_decoder::currentRenderWakeSequence();
+
+    const auto drawComposedFrame =
+            [&](double currentUiFps,
+                const calibration_profile::Profile& calibration,
+                const field_monitor::MonitorUiSnapshot& uiSnapshot,
+                bool drawVideo) {
+        glBindFramebuffer(
+                GL_FRAMEBUFFER,
+                frontBuffer.active
+                ? frontBuffer.framebuffer
+                : 0);
+
+        glViewport(
+                videoViewport.x,
+                videoViewport.y,
+                videoViewport.width,
+                videoViewport.height);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        if (drawVideo) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, planarMjpegYTexture);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, planarMjpegCbTexture);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, planarMjpegCrTexture);
+            glUseProgram(planarMjpegProgram);
+
+            glUniform1i(
+                    glGetUniformLocation(
+                            planarMjpegProgram,
+                            "uCalibrationEnabled"),
+                    calibration.enabled ? 1 : 0);
+            glUniform3fv(
+                    glGetUniformLocation(
+                            planarMjpegProgram,
+                            "uCalibrationRow0"),
+                    1,
+                    calibration.matrix.data());
+            glUniform3fv(
+                    glGetUniformLocation(
+                            planarMjpegProgram,
+                            "uCalibrationRow1"),
+                    1,
+                    calibration.matrix.data() + 3);
+            glUniform3fv(
+                    glGetUniformLocation(
+                            planarMjpegProgram,
+                            "uCalibrationRow2"),
+                    1,
+                    calibration.matrix.data() + 6);
+            const GLfloat normalizedOffset[3] = {
+                    calibration.offsetCode[0] / 255.0f,
+                    calibration.offsetCode[1] / 255.0f,
+                    calibration.offsetCode[2] / 255.0f,
+            };
+            glUniform3fv(
+                    glGetUniformLocation(
+                            planarMjpegProgram,
+                            "uCalibrationOffset"),
+                    1,
+                    normalizedOffset);
+            glUniform1i(
+                    glGetUniformLocation(
+                            planarMjpegProgram,
+                            "uPqToSdr"),
+                    calibration.pqInput ? 1 : 0);
+
+            glBindVertexArray(vao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+
+        scopeUi.drawHistogram(
+                scopeGpu.frontHistogramSsbo(),
+                scopeGpu.frontMaximaSsbo(),
+                scopeGpu.frontValid(),
+                histogramViewport,
+                vao);
+
+        scopeUi.drawOverlay(
+                currentUiFps,
+                width,
+                height,
+                uiLayout,
+                uiCanvas,
+                calibration.enabled,
+                calibration.width,
+                calibration.height,
+                calibration.limitedInput,
+                calibration.enabled ? calibration.colorimetry : 0,
+                uiSnapshot,
+                vao);
+
+        scopeUi.drawVectorscope(
+                scopeGpu.frontVectorscopeSsbo(),
+                scopeGpu.frontMaximaSsbo(),
+                scopeGpu.frontValid(),
+                vectorscopeViewport,
+                vao);
+        scopeUi.drawParade(
+                scopeGpu.frontParadeSsbo(),
+                scopeGpu.frontMaximaSsbo(),
+                scopeGpu.frontValid(),
+                paradeViewport,
+                vao);
+        scopeUi.drawWaveform(
+                scopeGpu.frontWaveformSsbo(),
+                scopeGpu.frontValid(),
+                waveformViewport,
+                vao);
+
+        scopeUi.drawMonitorForeground(
+                width,
+                height,
+                vao);
+    };
+
+    const auto presentUiRefresh =
+            [&](const calibration_profile::Profile& calibration,
+                const field_monitor::MonitorUiSnapshot& uiSnapshot) {
+        drawComposedFrame(
+                uiFps,
+                calibration,
+                uiSnapshot,
+                haveUploadedFrame);
+
+        if (frontBuffer.active) {
+            return submitStep15DFrontBuffer(frontBuffer, false);
+        }
+        return eglSwapBuffers(display, surface) == EGL_TRUE;
+    };
+
 
     while (gRunning.load(
             std::memory_order_acquire)) {
+
+        const calibration_profile::Profile loopCalibration =
+                calibration_profile::snapshot();
+        monitorUi.setHdrNitsAvailable(
+                loopCalibration.enabled && loopCalibration.pqInput);
+        processPendingSurfaceTaps(
+                height,
+                uiLayout,
+                uiCanvas,
+                monitorUi);
+
+        const field_monitor::MonitorUiSnapshot loopUiSnapshot =
+                monitorUi.snapshot();
+        if (loopUiSnapshot.revision != lastRenderedUiRevision) {
+            if (!presentUiRefresh(loopCalibration, loopUiSnapshot)) {
+                LOGE("UI-only refresh present failed");
+                break;
+            }
+            lastRenderedUiRevision = loopUiSnapshot.revision;
+        }
 
 
         // Poll already-submitted frame IDs without generating
@@ -4102,11 +4473,15 @@ static void renderLoop(ANativeWindow* window)
 
         uint64_t readySequence =
                 lastPlanarMjpegWakeSequence;
+        uint64_t readyRenderWakeSequence =
+                lastRenderWakeSequence;
 
         const bool frameReady =
-                uvc_mjpeg_decoder::waitForDecodedFrame(
+                uvc_mjpeg_decoder::waitForDecodedFrameOrRenderWake(
                         lastPlanarMjpegWakeSequence,
+                        lastRenderWakeSequence,
                         readySequence,
+                        readyRenderWakeSequence,
                         100
                 );
 
@@ -4115,7 +4490,22 @@ static void renderLoop(ANativeWindow* window)
             break;
         }
 
+        const bool renderWake =
+                readyRenderWakeSequence > lastRenderWakeSequence;
+        lastRenderWakeSequence = readyRenderWakeSequence;
+
+        if (renderWake) {
+            processPendingSurfaceTaps(
+                    height,
+                    uiLayout,
+                    uiCanvas,
+                    monitorUi);
+        }
+
         if (!frameReady) {
+            if (renderWake) {
+                continue;
+            }
             ++wakeTimeouts;
 
             if (wakeTimeouts <= 5 ||
@@ -4360,134 +4750,19 @@ static void renderLoop(ANativeWindow* window)
         }
 
 
-        // Step 15D routes the complete video + scopes + UI composition into
-        // the persistent AHardwareBuffer FBO.  The fallback path keeps the
-        // default EGL window framebuffer exactly as before.
-        glBindFramebuffer(
-                GL_FRAMEBUFFER,
-                frontBuffer.active
-                ? frontBuffer.framebuffer
-                : 0
-        );
-
-
-        glViewport(
-                videoViewport.x,
-                videoViewport.y,
-                videoViewport.width,
-                videoViewport.height
-        );
-
-        glClearColor(
-                0.0f,
-                0.0f,
-                0.0f,
-                1.0f
-        );
-
-        glClear(
-                GL_COLOR_BUFFER_BIT
-        );
-
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, planarMjpegYTexture);
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, planarMjpegCbTexture);
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, planarMjpegCrTexture);
-        glUseProgram(planarMjpegProgram);
-
         const calibration_profile::Profile calibration =
                 calibration_profile::snapshot();
         monitorUi.setHdrNitsAvailable(
                 calibration.enabled && calibration.pqInput);
         const field_monitor::MonitorUiSnapshot uiSnapshot =
                 monitorUi.snapshot();
-        glUniform1i(
-                glGetUniformLocation(planarMjpegProgram, "uCalibrationEnabled"),
-                calibration.enabled ? 1 : 0);
-        glUniform3fv(
-                glGetUniformLocation(planarMjpegProgram, "uCalibrationRow0"),
-                1, calibration.matrix.data());
-        glUniform3fv(
-                glGetUniformLocation(planarMjpegProgram, "uCalibrationRow1"),
-                1, calibration.matrix.data() + 3);
-        glUniform3fv(
-                glGetUniformLocation(planarMjpegProgram, "uCalibrationRow2"),
-                1, calibration.matrix.data() + 6);
-        const GLfloat normalizedOffset[3] = {
-                calibration.offsetCode[0] / 255.0f,
-                calibration.offsetCode[1] / 255.0f,
-                calibration.offsetCode[2] / 255.0f};
-        glUniform3fv(
-                glGetUniformLocation(planarMjpegProgram, "uCalibrationOffset"),
-                1, normalizedOffset);
-        glUniform1i(
-                glGetUniformLocation(planarMjpegProgram, "uPqToSdr"),
-                calibration.pqInput ? 1 : 0);
-
-        glBindVertexArray(
-                vao
-        );
-
-        glDrawArrays(
-                GL_TRIANGLES,
-                0,
-                3
-        );
-
-
-        // Step 15.4: display the latest completed scope SSBOs.
-        // ScopeUi never waits; ScopeGpu only exposes completed front data.
-        scopeUi.drawHistogram(
-                scopeGpu.frontHistogramSsbo(),
-                scopeGpu.frontMaximaSsbo(),
-                scopeGpu.frontValid(),
-                histogramViewport,
-                vao
-        );
-
-        // Draw the grid, labels, state-driven frame guides, and scope
-        // graticules before the
-        // waveform, parade and vectorscope so samples that coincide with a
-        // grid line remain visible.
-        scopeUi.drawOverlay(
+        haveUploadedFrame = true;
+        drawComposedFrame(
                 uiFps,
-                width,
-                height,
-                uiLayout,
-                uiCanvas,
-                calibration.enabled,
-                calibration.width,
-                calibration.height,
-                calibration.limitedInput,
-                calibration.enabled ? calibration.colorimetry : 0,
-                uiSnapshot.state,
-                vao
-        );
-
-        scopeUi.drawVectorscope(
-                scopeGpu.frontVectorscopeSsbo(),
-                scopeGpu.frontMaximaSsbo(),
-                scopeGpu.frontValid(),
-                vectorscopeViewport,
-                vao
-        );
-
-        scopeUi.drawParade(
-                scopeGpu.frontParadeSsbo(),
-                scopeGpu.frontMaximaSsbo(),
-                scopeGpu.frontValid(),
-                paradeViewport,
-                vao
-        );
-
-        scopeUi.drawWaveform(
-                scopeGpu.frontWaveformSsbo(),
-                scopeGpu.frontValid(),
-                waveformViewport,
-                vao
-        );
+                calibration,
+                uiSnapshot,
+                true);
+        lastRenderedUiRevision = uiSnapshot.revision;
 
 
         // T3: complete frame composition commands issued.
@@ -4925,6 +5200,20 @@ static void renderLoop(ANativeWindow* window)
 // ------------------------------------------------------------
 
 extern "C"
+JNIEXPORT void JNICALL
+Java_com_hev_uvcfieldmonitor_MainActivity_nativeOnSurfaceTap(
+        JNIEnv* /* env */,
+        jobject /* thiz */,
+        jfloat x,
+        jfloat y)
+{
+    enqueueSurfaceTap(
+            static_cast<float>(x),
+            static_cast<float>(y));
+}
+
+
+extern "C"
 JNIEXPORT jboolean JNICALL
 Java_com_hev_uvcfieldmonitor_MainActivity_nativeOpenUsb(
         JNIEnv* /* env */,
@@ -5029,6 +5318,11 @@ static void stopRendererLocked()
         ANativeWindow_release(gWindow);
 
         gWindow = nullptr;
+    }
+
+    {
+        std::lock_guard<std::mutex> inputLock(gUiInputMutex);
+        gPendingSurfaceTaps.clear();
     }
 }
 

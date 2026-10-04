@@ -149,6 +149,7 @@ add_library(
         native-lib.cpp
         calibration_profile.cpp
         monitor_ui_controller.cpp
+        monitor_ui_geometry.cpp
         ms2109_pu_controls.cpp
         uvc_mjpeg_decoder.cpp
         scope_gpu.cpp

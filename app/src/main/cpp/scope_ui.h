@@ -58,8 +58,16 @@ public:
             int calibrationHeight,
             bool calibrationLimited,
             int vectorColorimetry,
-            const MonitorUiRenderState& uiState,
+            const MonitorUiSnapshot& uiSnapshot,
             GLuint vao);
+
+    // Draw only the MENU / Function Rail / Preset vertices prepared by the
+    // latest drawOverlay() call. This keeps controls above scope samples
+    // without moving the existing grid and label pass above those samples.
+    void drawMonitorForeground(
+            EGLint surfaceWidth,
+            EGLint surfaceHeight,
+            GLuint vao) const;
 
     void shutdown();
 
@@ -70,6 +78,8 @@ private:
     GLuint vectorscopeRenderProgram_ = 0;
     GLuint uiProgram_ = 0;
     GLuint uiVbo_ = 0;
+    GLint monitorForegroundFirst_ = 0;
+    GLsizei monitorForegroundCount_ = 0;
 };
 
 }  // namespace field_monitor

@@ -134,6 +134,7 @@ static bool gOutputInfoLogged = false;
 
 static std::array<DecodedFrameSlot, DECODED_FRAME_SLOT_COUNT> gDecodedSlots;
 static std::atomic<uint64_t> gLatestReadySequence{0};
+static std::atomic<uint64_t> gRenderWakeSequence{0};
 
 
 // ------------------------------------------------------------
@@ -1661,6 +1662,65 @@ bool waitForDecodedFrame(
 
     outReadySequence = readySequence;
     return true;
+}
+
+
+bool waitForDecodedFrameOrRenderWake(
+        uint64_t afterFrameSequence,
+        uint64_t afterRenderWakeSequence,
+        uint64_t& outReadyFrameSequence,
+        uint64_t& outRenderWakeSequence,
+        int timeoutMs)
+{
+    outReadyFrameSequence = afterFrameSequence;
+    outRenderWakeSequence = afterRenderWakeSequence;
+
+    if (timeoutMs < 0) {
+        timeoutMs = 0;
+    }
+
+    std::unique_lock<std::mutex> lock(gMutex);
+
+    const auto predicate =
+            [afterFrameSequence, afterRenderWakeSequence]() {
+                return
+                        !gRunning.load(std::memory_order_acquire) ||
+                        gLatestReadySequence.load(std::memory_order_acquire) >
+                                afterFrameSequence ||
+                        gRenderWakeSequence.load(std::memory_order_acquire) >
+                                afterRenderWakeSequence;
+            };
+
+    if (!predicate()) {
+        const bool signaled =
+                gFrameReadyCv.wait_for(
+                        lock,
+                        std::chrono::milliseconds(timeoutMs),
+                        predicate);
+        if (!signaled) {
+            return false;
+        }
+    }
+
+    outReadyFrameSequence =
+            gLatestReadySequence.load(std::memory_order_acquire);
+    outRenderWakeSequence =
+            gRenderWakeSequence.load(std::memory_order_acquire);
+
+    return outReadyFrameSequence > afterFrameSequence;
+}
+
+
+uint64_t currentRenderWakeSequence()
+{
+    return gRenderWakeSequence.load(std::memory_order_acquire);
+}
+
+
+void notifyRenderWake()
+{
+    gRenderWakeSequence.fetch_add(1, std::memory_order_acq_rel);
+    gFrameReadyCv.notify_one();
 }
 
 
