@@ -150,6 +150,7 @@ add_library(
         calibration_profile.cpp
         monitor_ui_controller.cpp
         monitor_ui_geometry.cpp
+        preview_assist.cpp
         ms2109_pu_controls.cpp
         uvc_mjpeg_decoder.cpp
         scope_gpu.cpp

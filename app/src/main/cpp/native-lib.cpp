@@ -18,6 +18,7 @@
 #include "field_monitor_layout.h"
 #include "monitor_ui_controller.h"
 #include "monitor_ui_geometry.h"
+#include "preview_assist.h"
 #include "scope_ui.h"
 #include "scope_gpu.h"
 #include "diagnostic_config.h"
@@ -1821,8 +1822,26 @@ static GLuint compileShader(
 }
 
 
-static GLuint createPlanarMjpegYuvProgram()
+struct PlanarMjpegUniformLocations {
+    GLint y = -1;
+    GLint cb = -1;
+    GLint cr = -1;
+    GLint pqToSdr = -1;
+    GLint calibrationEnabled = -1;
+    GLint calibrationRow0 = -1;
+    GLint calibrationRow1 = -1;
+    GLint calibrationRow2 = -1;
+    GLint calibrationOffset = -1;
+    GLint zebraEnabled = -1;
+    GLint zebraLow = -1;
+    GLint zebraHigh = -1;
+    GLint sourceLumaCoefficients = -1;
+};
+
+static GLuint createPlanarMjpegYuvProgram(
+        PlanarMjpegUniformLocations& uniforms)
 {
+    uniforms = {};
     static const char* vertexSource = R"(#version 300 es
 
 out vec2 vUv;
@@ -1859,6 +1878,10 @@ uniform vec3 uCalibrationRow0;
 uniform vec3 uCalibrationRow1;
 uniform vec3 uCalibrationRow2;
 uniform vec3 uCalibrationOffset;
+uniform int uZebraEnabled;
+uniform float uZebraLow;
+uniform float uZebraHigh;
+uniform vec3 uSourceLumaCoefficients;
 out vec4 outColor;
 
 // SMPTE ST 2084 (PQ) EOTF. Input is normalized PQ code value.
@@ -1935,31 +1958,48 @@ void main()
     float cb = (cb8 - 128.0) / 224.0;
     float cr = (cr8 - 128.0) / 224.0;
 
-    vec3 rgb;
-    rgb.r = y + 1.402000 * cr;
-    rgb.g = y - 0.344136 * cb - 0.714136 * cr;
-    rgb.b = y + 1.772000 * cb;
-    rgb = clamp(rgb, 0.0, 1.0);
+    vec3 analysisRgb;
+    analysisRgb.r = y + 1.402000 * cr;
+    analysisRgb.g = y - 0.344136 * cb - 0.714136 * cr;
+    analysisRgb.b = y + 1.772000 * cb;
+    analysisRgb = clamp(analysisRgb, 0.0, 1.0);
 
     if (uCalibrationEnabled != 0) {
-        rgb = vec3(
-            dot(uCalibrationRow0, rgb),
-            dot(uCalibrationRow1, rgb),
-            dot(uCalibrationRow2, rgb)
+        analysisRgb = vec3(
+            dot(uCalibrationRow0, analysisRgb),
+            dot(uCalibrationRow1, analysisRgb),
+            dot(uCalibrationRow2, analysisRgb)
         ) + uCalibrationOffset;
-        rgb = clamp(rgb, 0.0, 1.0);
+        analysisRgb = clamp(analysisRgb, 0.0, 1.0);
     }
+
+    // Stage 3 analysis and final display are intentionally separate. Assist
+    // decisions use calibrated encoded RGB and never use the tone-mapped RGB.
+    vec3 displayRgb = analysisRgb;
 
     if (uPqToSdr != 0) {
         // Preserve the existing planar-MJPEG YCbCr -> RGB reconstruction above.
         // Only the preview interprets the recovered R'G'B' as PQ/BT.2020.
-        vec3 rgb2020Nits = pqEotfNits(rgb);
+        vec3 rgb2020Nits = pqEotfNits(analysisRgb);
         vec3 rgb2020SdrLinear = toneMap203NitToSdrLinear(rgb2020Nits);
         vec3 rgb709Linear = bt2020ToBt709Linear(rgb2020SdrLinear);
-        rgb = linearToSrgb(clamp(rgb709Linear, 0.0, 1.0));
+        displayRgb = linearToSrgb(clamp(rgb709Linear, 0.0, 1.0));
     }
 
-    outColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
+    if (uZebraEnabled != 0) {
+        float sourceVideoLevel =
+            dot(analysisRgb, uSourceLumaCoefficients);
+        bool zebraHit =
+            sourceVideoLevel >= uZebraLow &&
+            sourceVideoLevel <= uZebraHigh;
+        bool zebraStripe =
+            mod(gl_FragCoord.x + gl_FragCoord.y, 8.0) < 4.0;
+        if (zebraHit && zebraStripe) {
+            displayRgb = vec3(1.0);
+        }
+    }
+
+    outColor = vec4(clamp(displayRgb, 0.0, 1.0), 1.0);
 }
 )";
 
@@ -1992,13 +2032,34 @@ void main()
     glDeleteShader(fs);
 
     if (program != 0) {
-        glUseProgram(program);
-        glUniform1i(glGetUniformLocation(program, "uY"), 0);
-        glUniform1i(glGetUniformLocation(program, "uCb"), 1);
-        glUniform1i(glGetUniformLocation(program, "uCr"), 2);
+        uniforms.y = glGetUniformLocation(program, "uY");
+        uniforms.cb = glGetUniformLocation(program, "uCb");
+        uniforms.cr = glGetUniformLocation(program, "uCr");
+        uniforms.pqToSdr = glGetUniformLocation(program, "uPqToSdr");
+        uniforms.calibrationEnabled =
+                glGetUniformLocation(program, "uCalibrationEnabled");
+        uniforms.calibrationRow0 =
+                glGetUniformLocation(program, "uCalibrationRow0");
+        uniforms.calibrationRow1 =
+                glGetUniformLocation(program, "uCalibrationRow1");
+        uniforms.calibrationRow2 =
+                glGetUniformLocation(program, "uCalibrationRow2");
+        uniforms.calibrationOffset =
+                glGetUniformLocation(program, "uCalibrationOffset");
+        uniforms.zebraEnabled =
+                glGetUniformLocation(program, "uZebraEnabled");
+        uniforms.zebraLow = glGetUniformLocation(program, "uZebraLow");
+        uniforms.zebraHigh = glGetUniformLocation(program, "uZebraHigh");
+        uniforms.sourceLumaCoefficients =
+                glGetUniformLocation(program, "uSourceLumaCoefficients");
 
-        glUniform1i(glGetUniformLocation(program, "uPqToSdr"), 0);
-        glUniform1i(glGetUniformLocation(program, "uCalibrationEnabled"), 0);
+        glUseProgram(program);
+        glUniform1i(uniforms.y, 0);
+        glUniform1i(uniforms.cb, 1);
+        glUniform1i(uniforms.cr, 2);
+        glUniform1i(uniforms.pqToSdr, 0);
+        glUniform1i(uniforms.calibrationEnabled, 0);
+        glUniform1i(uniforms.zebraEnabled, 0);
     }
 
     return program;
@@ -4085,8 +4146,9 @@ static void renderLoop(ANativeWindow* window)
     );
 
 
+    PlanarMjpegUniformLocations planarMjpegUniforms{};
     GLuint planarMjpegProgram =
-            createPlanarMjpegYuvProgram();
+            createPlanarMjpegYuvProgram(planarMjpegUniforms);
 
     if (!planarMjpegProgram) {
         LOGE(
@@ -4306,26 +4368,18 @@ static void renderLoop(ANativeWindow* window)
             glUseProgram(planarMjpegProgram);
 
             glUniform1i(
-                    glGetUniformLocation(
-                            planarMjpegProgram,
-                            "uCalibrationEnabled"),
+                    planarMjpegUniforms.calibrationEnabled,
                     calibration.enabled ? 1 : 0);
             glUniform3fv(
-                    glGetUniformLocation(
-                            planarMjpegProgram,
-                            "uCalibrationRow0"),
+                    planarMjpegUniforms.calibrationRow0,
                     1,
                     calibration.matrix.data());
             glUniform3fv(
-                    glGetUniformLocation(
-                            planarMjpegProgram,
-                            "uCalibrationRow1"),
+                    planarMjpegUniforms.calibrationRow1,
                     1,
                     calibration.matrix.data() + 3);
             glUniform3fv(
-                    glGetUniformLocation(
-                            planarMjpegProgram,
-                            "uCalibrationRow2"),
+                    planarMjpegUniforms.calibrationRow2,
                     1,
                     calibration.matrix.data() + 6);
             const GLfloat normalizedOffset[3] = {
@@ -4334,16 +4388,34 @@ static void renderLoop(ANativeWindow* window)
                     calibration.offsetCode[2] / 255.0f,
             };
             glUniform3fv(
-                    glGetUniformLocation(
-                            planarMjpegProgram,
-                            "uCalibrationOffset"),
+                    planarMjpegUniforms.calibrationOffset,
                     1,
                     normalizedOffset);
             glUniform1i(
-                    glGetUniformLocation(
-                            planarMjpegProgram,
-                            "uPqToSdr"),
+                    planarMjpegUniforms.pqToSdr,
                     calibration.pqInput ? 1 : 0);
+
+            const field_monitor::EffectivePreviewState effective =
+                    field_monitor::resolveEffectivePreviewState(
+                            uiSnapshot.state.assist);
+            const field_monitor::ZebraShaderParams zebra =
+                    field_monitor::resolveZebraShaderParams(
+                            effective.zebraVisible
+                            ? effective.zebra
+                            : field_monitor::ZebraPreset::Off);
+            const std::array<float, 3> sourceLumaCoefficients =
+                    field_monitor::resolveSourceLumaCoefficients(
+                            calibration.enabled,
+                            calibration.colorimetry);
+            glUniform1i(
+                    planarMjpegUniforms.zebraEnabled,
+                    zebra.enabled ? 1 : 0);
+            glUniform1f(planarMjpegUniforms.zebraLow, zebra.low);
+            glUniform1f(planarMjpegUniforms.zebraHigh, zebra.high);
+            glUniform3fv(
+                    planarMjpegUniforms.sourceLumaCoefficients,
+                    1,
+                    sourceLumaCoefficients.data());
 
             glBindVertexArray(vao);
             glDrawArrays(GL_TRIANGLES, 0, 3);
