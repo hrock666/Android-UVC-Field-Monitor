@@ -65,6 +65,41 @@ PeakingShaderParams resolvePeakingShaderParams(PeakingPreset preset)
     }
 }
 
+FalseColorShaderParams resolveFalseColorShaderParams(FalseColorMode mode)
+{
+    FalseColorShaderParams params{};
+    params.enabled = mode != FalseColorMode::Off;
+    params.domain =
+            mode == FalseColorMode::HdrNits
+            ? FalseColorDomain::HdrNits
+            : FalseColorDomain::VideoLevel;
+
+    params.videoBoundaries = {
+            0.00f,
+            0.05f,
+            0.20f,
+            0.40f,
+            0.55f,
+            0.70f,
+            0.85f,
+            0.95f,
+            1.00f,
+    };
+    params.videoPalette = {
+            0.35f, 0.00f, 0.50f,  // < 0 IRE: Dark Purple
+            0.55f, 0.00f, 0.80f,  // 0..5 IRE: Purple
+            0.00f, 0.15f, 1.00f,  // 5..20 IRE: Blue
+            0.00f, 0.80f, 1.00f,  // 20..40 IRE: Cyan
+            0.45f, 0.45f, 0.45f,  // 40..55 IRE: Gray
+            0.00f, 1.00f, 0.00f,  // 55..70 IRE: Green
+            1.00f, 1.00f, 0.00f,  // 70..85 IRE: Yellow
+            1.00f, 0.50f, 0.00f,  // 85..95 IRE: Orange
+            1.00f, 0.00f, 0.00f,  // 95..100 IRE: Red
+            1.00f, 1.00f, 1.00f,  // >= 100 IRE: White
+    };
+    return params;
+}
+
 std::array<float, 3> resolveSourceLumaCoefficients(
         bool calibrationEnabled,
         int colorimetry)

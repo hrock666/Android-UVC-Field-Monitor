@@ -1840,6 +1840,10 @@ struct PlanarMjpegUniformLocations {
     GLint peakingMono = -1;
     GLint peakingThreshold = -1;
     GLint peakingColor = -1;
+    GLint falseColorEnabled = -1;
+    GLint falseColorDomain = -1;
+    GLint falseColorVideoBoundaries = -1;
+    GLint falseColorVideoPalette = -1;
 };
 
 static GLuint createPlanarMjpegYuvProgram(
@@ -1890,6 +1894,10 @@ uniform int uPeakingEnabled;
 uniform int uPeakingMono;
 uniform float uPeakingThreshold;
 uniform vec3 uPeakingColor;
+uniform int uFalseColorEnabled;
+uniform int uFalseColorDomain;
+uniform float uFalseColorVideoBoundaries[9];
+uniform vec3 uFalseColorVideoPalette[10];
 out vec4 outColor;
 
 // SMPTE ST 2084 (PQ) EOTF. Input is normalized PQ code value.
@@ -1978,7 +1986,6 @@ vec3 sampleAnalysisRgb(vec2 uv)
             dot(uCalibrationRow1, rgb),
             dot(uCalibrationRow2, rgb)
         ) + uCalibrationOffset;
-        rgb = clamp(rgb, 0.0, 1.0);
     }
 
     return rgb;
@@ -1989,13 +1996,32 @@ float sampleAnalysisLuma(vec2 uv)
     return dot(sampleAnalysisRgb(uv), uSourceLumaCoefficients);
 }
 
+vec3 mapVideoLevelFalseColor(float sourceVideoLevel)
+{
+    int band = 0;
+    for (int index = 0; index < 9; ++index) {
+        if (sourceVideoLevel >= uFalseColorVideoBoundaries[index]) {
+            band = index + 1;
+        }
+    }
+    return uFalseColorVideoPalette[band];
+}
+
 void main()
 {
     vec3 analysisRgb = sampleAnalysisRgb(vUv);
+    float analysisY = dot(analysisRgb, uSourceLumaCoefficients);
+
+    // VideoLevel False Color has highest visual priority and is evaluated
+    // directly in the normalized Stage 3 source domain.
+    if (uFalseColorEnabled != 0 && uFalseColorDomain == 0) {
+        outColor = vec4(mapVideoLevelFalseColor(analysisY), 1.0);
+        return;
+    }
 
     // Stage 3 analysis and final display are intentionally separate. Assist
     // decisions use calibrated encoded RGB and never use the tone-mapped RGB.
-    vec3 displayRgb = analysisRgb;
+    vec3 displayRgb = clamp(analysisRgb, 0.0, 1.0);
 
     if (uPqToSdr != 0) {
         // Preserve the existing planar-MJPEG YCbCr -> RGB reconstruction above.
@@ -2013,11 +2039,9 @@ void main()
     }
 
     if (uZebraEnabled != 0) {
-        float sourceVideoLevel =
-            dot(analysisRgb, uSourceLumaCoefficients);
         bool zebraHit =
-            sourceVideoLevel >= uZebraLow &&
-            sourceVideoLevel <= uZebraHigh;
+            analysisY >= uZebraLow &&
+            analysisY <= uZebraHigh;
         bool zebraStripe =
             mod(gl_FragCoord.x + gl_FragCoord.y, 8.0) < 4.0;
         if (zebraHit && zebraStripe) {
@@ -2098,6 +2122,16 @@ void main()
                 glGetUniformLocation(program, "uPeakingThreshold");
         uniforms.peakingColor =
                 glGetUniformLocation(program, "uPeakingColor");
+        uniforms.falseColorEnabled =
+                glGetUniformLocation(program, "uFalseColorEnabled");
+        uniforms.falseColorDomain =
+                glGetUniformLocation(program, "uFalseColorDomain");
+        uniforms.falseColorVideoBoundaries =
+                glGetUniformLocation(
+                        program,
+                        "uFalseColorVideoBoundaries[0]");
+        uniforms.falseColorVideoPalette =
+                glGetUniformLocation(program, "uFalseColorVideoPalette[0]");
 
         glUseProgram(program);
         glUniform1i(uniforms.y, 0);
@@ -2107,6 +2141,7 @@ void main()
         glUniform1i(uniforms.calibrationEnabled, 0);
         glUniform1i(uniforms.zebraEnabled, 0);
         glUniform1i(uniforms.peakingEnabled, 0);
+        glUniform1i(uniforms.falseColorEnabled, 0);
     }
 
     return program;
@@ -4455,6 +4490,11 @@ static void renderLoop(ANativeWindow* window)
                             effective.peakingVisible
                             ? effective.peaking
                             : field_monitor::PeakingPreset::Off);
+            const field_monitor::FalseColorShaderParams falseColor =
+                    field_monitor::resolveFalseColorShaderParams(
+                            effective.falseColorVisible
+                            ? effective.falseColor
+                            : field_monitor::FalseColorMode::Off);
             const std::array<float, 3> sourceLumaCoefficients =
                     field_monitor::resolveSourceLumaCoefficients(
                             calibration.enabled,
@@ -4481,6 +4521,22 @@ static void renderLoop(ANativeWindow* window)
                     planarMjpegUniforms.peakingColor,
                     1,
                     peaking.color.data());
+            glUniform1i(
+                    planarMjpegUniforms.falseColorEnabled,
+                    falseColor.enabled ? 1 : 0);
+            glUniform1i(
+                    planarMjpegUniforms.falseColorDomain,
+                    static_cast<GLint>(falseColor.domain));
+            glUniform1fv(
+                    planarMjpegUniforms.falseColorVideoBoundaries,
+                    static_cast<GLsizei>(
+                            falseColor.videoBoundaries.size()),
+                    falseColor.videoBoundaries.data());
+            glUniform3fv(
+                    planarMjpegUniforms.falseColorVideoPalette,
+                    static_cast<GLsizei>(
+                            field_monitor::FALSE_COLOR_VIDEO_BAND_COUNT),
+                    falseColor.videoPalette.data());
 
             glBindVertexArray(vao);
             glDrawArrays(GL_TRIANGLES, 0, 3);
