@@ -148,6 +148,7 @@ add_library(
         SHARED
         native-lib.cpp
         calibration_profile.cpp
+        monitor_ui_controller.cpp
         ms2109_pu_controls.cpp
         uvc_mjpeg_decoder.cpp
         scope_gpu.cpp
