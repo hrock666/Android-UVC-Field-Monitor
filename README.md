@@ -16,6 +16,12 @@ Android端末をUSB Video Class（UVC）キャプチャデバイスと組み合�
 
 ---
 
+## 使用例
+
+![Usage example](docs/images/Usage_example.jpg)
+
+---
+
 ## 概要
 
 このプロジェクトでは、Android端末を簡易的な映像確認用ディスプレイではなく、映像信号を解析できる**フィールドモニター**として使用することを目標としています。
@@ -235,6 +241,44 @@ no video FIFO
 ```
 
 decode error frameはrendererへpublishせず、前回の正常表示を保持します。
+
+---
+
+## Latency Measurement
+
+実機構成での画面-to-画面（glass-to-glass）遅延を、240 fpsのハイスピード撮影で測定しました。
+
+測定ではWindows上に高フレームレートのストップウォッチを表示し、その画面をEOS 6D Mark IIでLive View撮影します。Windows画面と比較対象の表示を同一画角に収め、iPhone 12 Pro Maxの240 fps撮影から同一フレーム内の表示時刻差を読み取りました。
+
+```text
+Windows display
+  ↓
+EOS 6D Mark II
+  ├─ Rear Live View LCD
+  └─ HDMI → MS2130 → Android UVC Field Monitor → Android display
+```
+
+### 実測結果
+
+| 測定経路 | Windows側表示 | 比較対象表示 | 遅延 |
+|---|---:|---:|---:|
+| Windows display → EOS 6D Mark II Live View LCD | 10362 ms | 10303 ms | **59 ms** |
+| Windows display → EOS 6D Mark II → MS2130 → Teclast P30T 120 Hz | 7463 ms | 7335 ms | **128 ms** |
+| Windows display → EOS 6D Mark II → MS2130 → ZTE A202ZT 60 Hz | 1924 ms | 1658 ms | **266 ms** |
+
+同じEOS 6D Mark IIとMS2130を使用した条件では、P30T 120 Hz構成はA202ZT 60 Hz構成より**138 ms短く、約52%低いglass-to-glass遅延**となりました。
+
+EOS 6D Mark II本体LCDまでの59 msを単純差分すると、P30T構成では残りは約69 msです。
+
+```text
+128 ms - 59 ms ≈ 69 ms
+```
+
+ただし、この約69 msをMS2130＋Androidアプリ単体の厳密な遅延値として扱うことはできません。EOS 6D Mark IIの本体LCD経路とHDMI出力経路が同一の内部タイミングであることは、この測定では確認していないためです。あくまで実測値から得られる参考差分です。
+
+128 msには、カメラの撮像・Live View処理、HDMI出力、MS2130のキャプチャ処理、USB転送、MJPEGデコード、OpenGL ES描画、Androidの表示パイプライン、LCD表示までが含まれます。したがって、この値はアプリ単体の処理遅延ではなく、**実際の撮影構成におけるend-to-endのglass-to-glass遅延**です。
+
+測定値はカメラ、HDMI出力モード、キャプチャデバイス、Android端末、表示リフレッシュレート、Androidの描画・合成経路、パネル特性などによって変化します。
 
 ---
 

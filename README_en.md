@@ -16,6 +16,12 @@ English | [日本語](README.md)
 
 ---
 
+## Usage example
+
+![Usage example](docs/images/Usage_example.jpg)
+
+---
+
 ## Overview
 
 The goal of this project is to use an Android device not merely as a video preview display, but as a **field monitor capable of real-time signal analysis**.
@@ -180,6 +186,44 @@ no video FIFO
 ```
 
 Frames that fail JPEG decoding are not published to the renderer, so the previous valid image remains visible.
+
+---
+
+## Latency Measurement
+
+Screen-to-screen (glass-to-glass) latency was measured on real hardware using 240 fps high-speed video.
+
+A high-frame-rate stopwatch was displayed on a Windows PC and viewed through the EOS 6D Mark II Live View path. The Windows display and the target display were recorded in the same shot with an iPhone 12 Pro Max at 240 fps, and latency was obtained from the displayed timestamp difference within the same recorded frame.
+
+```text
+Windows display
+  ↓
+EOS 6D Mark II
+  ├─ Rear Live View LCD
+  └─ HDMI → MS2130 → Android UVC Field Monitor → Android display
+```
+
+### Measured results
+
+| Measurement path | Windows display | Target display | Latency |
+|---|---:|---:|---:|
+| Windows display → EOS 6D Mark II Live View LCD | 10362 ms | 10303 ms | **59 ms** |
+| Windows display → EOS 6D Mark II → MS2130 → Teclast P30T 120 Hz | 7463 ms | 7335 ms | **128 ms** |
+| Windows display → EOS 6D Mark II → MS2130 → ZTE A202ZT 60 Hz | 1924 ms | 1658 ms | **266 ms** |
+
+With the same EOS 6D Mark II and MS2130, the P30T 120 Hz configuration measured **138 ms lower latency, or approximately 52% less glass-to-glass latency**, than the A202ZT 60 Hz configuration.
+
+A simple subtraction of the 59 ms rear-LCD measurement from the 128 ms P30T result leaves approximately 69 ms:
+
+```text
+128 ms - 59 ms ≈ 69 ms
+```
+
+This approximately 69 ms value must not be treated as a precise standalone latency figure for the MS2130 + Android application. This measurement does not establish that the EOS 6D Mark II rear-LCD path and HDMI-output path have identical internal timing, so the value is only a differential reference.
+
+The 128 ms result includes camera capture and Live View processing, HDMI output, MS2130 capture processing, USB transfer, MJPEG decoding, OpenGL ES rendering, the Android display pipeline, and LCD output. It therefore represents **end-to-end glass-to-glass latency for the tested shooting configuration**, not application-only processing latency.
+
+Measured latency can vary with the camera, HDMI output mode, capture device, Android host, display refresh rate, Android rendering/composition path, and panel characteristics.
 
 ---
 
