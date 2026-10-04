@@ -167,7 +167,12 @@ void main()
         const float maxCount = 720.0;
 
         if (count > 0.0) {
-            intensity = sqrt(count / maxCount);
+            const float TRACE_GAIN = 1.5;
+            intensity = clamp(
+                TRACE_GAIN * sqrt(count / maxCount),
+                0.0,
+                1.0
+            );
         }
     }
 
@@ -298,7 +303,12 @@ float density(uint v, uint vmax)
         return 0.0;
     }
 
-    return sqrt(float(v) / float(vmax));
+    const float TRACE_GAIN = 1.5;
+    return clamp(
+        TRACE_GAIN * sqrt(float(v) / float(vmax)),
+        0.0,
+        1.0
+    );
 }
 
 void main()
@@ -589,7 +599,12 @@ float density(uint v, uint vmax)
         return 0.0;
     }
 
-    return sqrt(float(v) / float(vmax));
+    const float TRACE_GAIN = 1.75;
+    return clamp(
+        TRACE_GAIN * sqrt(float(v) / float(vmax)),
+        0.0,
+        1.0
+    );
 }
 
 void main()
@@ -619,24 +634,9 @@ void main()
 
         int vx = dx + RADIUS;
         int vy = dy + RADIUS;
-        uint d = 0u;
-
-        // Display-only 3x3 expansion. The accumulator itself remains one
-        // exact Cb/Cr bin, matching the CM4 implementation.
-        for (int oy = -1; oy <= 1; ++oy) {
-            for (int ox = -1; ox <= 1; ++ox) {
-                int sx = vx + ox;
-                int sy = vy + oy;
-
-                if (sx >= 0 && sx < VECTOR_D &&
-                    sy >= 0 && sy < VECTOR_D) {
-                    // Mali-G57: do not pass a readonly SSBO element directly
-                    // to max(); copy the value to a local first.
-                    uint binValue = vectorscope[sy * VECTOR_D + sx];
-                    d = max(d, binValue);
-                }
-            }
-        }
+        // Render the exact accumulated Cb/Cr bin. One logical pixel remains
+        // subject to the common UI canvas scale, without 3x3 dilation.
+        uint d = vectorscope[vy * VECTOR_D + vx];
 
         // Mali-G57: same readonly-SSBO qualifier workaround as Parade
         // and Histogram. Pass a plain local value to density().

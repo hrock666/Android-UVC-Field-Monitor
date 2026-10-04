@@ -419,6 +419,14 @@ Stage 3 PQ code
 
 ## Phase UI-6: Integration
 
+### Scope visibility tuning
+
+- Waveform trace gain: `1.5`
+- RGB Parade trace gain: `1.5`
+- Vectorscope trace gain: `1.75`
+- gainはdensityの平方根変換後へ乗算し、alphaを0〜1へclampする。
+- Vectorscopeは3×3 max expansionを廃止し、exact 1-binを描画する。
+
 ### 組み合わせ試験
 
 ```text
@@ -516,8 +524,10 @@ Frame 2.39
 | D-18 | Zebra斜線のperiod / width | UI-3 | 決定済み: 8px / 4px |
 | D-19 | Stage 3 source lumaの係数選択 | UI-3 / UI-4 / UI-5 | 決定済み: colorimetry連動 |
 | D-20 | 非PQ入力でHDR NITSを選択した場合の動作 | UI-5H | 決定済み: 選択禁止／VIDEOへ復帰 |
+| D-21 | Scope trace gain | UI-6 | 決定済み: Waveform 1.5 / Parade 1.5 / Vectorscope 1.75 |
+| D-22 | Vectorscope display expansion | UI-6 | 決定済み: exact 1-bin（3×3 expansion廃止） |
 
-全決定事項D-01〜D-20のうち、本実装に必要な項目は決定済み。
+全決定事項D-01〜D-22のうち、本実装に必要な項目は決定済み。
 
 ---
 
@@ -546,6 +556,8 @@ Frame 2.39
 | D-18 | 2026-10-04 | Zebra斜線は `gl_FragCoord.x + gl_FragCoord.y` による45度、period 8 physical px、白線幅4 physical px、duty 50%とする。 | Zebra hit画素のうちpattern該当部だけを不透明WHITEへ置換し、それ以外は元のPreview表示を維持する。 |
 | D-19 | 2026-10-04 | Stage 3 source lumaは入力colorimetryに連動し、BT.601=`(0.2990,0.5870,0.1140)`、BT.709=`(0.2126,0.7152,0.0722)`、BT.2020=`(0.2627,0.6780,0.0593)` とする。Profile無効時はBT.601。HDR NITSはPQ EOTF後のlinear BT.2020 RGBへBT.2020係数を使用する。 | Zebra / Peaking / VideoLevel False Colorで共通helperを使用し、calibration colorimetryから係数uniformを解決する。HDR NITS用linear luminance helperはencoded source luma helperと分離する。 |
 | D-20 | 2026-10-04 | HDR NITSは `pqInput=true` の場合だけ選択可能とする。非PQまたはProfile無効時はHDR NITS行をdim表示して直接tapを無視し、F3 cycleでもスキップする。使用中にPQ Profileが解除された場合はVIDEOへ自動復帰する。 | controllerへHDR NITS availabilityを渡し、preset enable判定、cycle、Profile変更時のstate normalizationを一元管理する。Runtime Statusは復帰と同時に `FC VIDEO` へ更新する。 |
+| D-21 | 2026-10-04 | Scope trace gainはWaveform `1.5`、RGB Parade `1.5`、Vectorscope `1.75` とする。 | `sqrt(density)` の後へgainを乗算し、alphaを0〜1へclampする。Histogramは変更しない。 |
+| D-22 | 2026-10-04 | Vectorscopeはexact 1-bin表示とし、3×3 max expansionを廃止する。 | Cb/Cr accumulatorの該当binを直接描画し、分布精度を維持しながらSSBO readを9回から1回へ削減する。 |
 
 ---
 
@@ -559,6 +571,6 @@ Frame 2.39
 | UI-3 | 完了 | Zebra、Stage 3判定、colorimetry連動 |
 | UI-4 | 完了 | Peaking / MONO、4-neighbor Stage 3勾配 |
 | UI-5 | 完了 | VideoLevel False Color、10 band palette |
-| UI-5H | 実装済み・手動確認待ち | PQ EOTF、absolute nits、11 band palette |
-| UI-6 | 未着手 | Integration |
+| UI-5H | 完了 | PQ EOTF、absolute nits、11 band palette |
+| UI-6 | 実装中・手動確認待ち | Scope trace gain調整、Vectorscope exact 1-bin化 |
 
