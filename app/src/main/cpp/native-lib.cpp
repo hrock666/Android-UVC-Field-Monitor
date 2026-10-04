@@ -1247,7 +1247,7 @@ static void runStep15AFrontBufferCapabilityProbe(
 // a SurfaceControl transaction carrying the persistent HardwareBuffer.
 // ------------------------------------------------------------
 
-static constexpr bool STEP15D_FRONT_BUFFER_ENABLE = true;
+static constexpr bool STEP15D_FRONT_BUFFER_ENABLE = false;
 static constexpr int STEP15D_MIN_API_LEVEL = 36;  // Android 16 experiment only.
 
 struct Step15DFrontBuffer {
