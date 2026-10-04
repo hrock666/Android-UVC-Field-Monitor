@@ -44,6 +44,27 @@ ZebraShaderParams resolveZebraShaderParams(ZebraPreset preset)
     }
 }
 
+PeakingShaderParams resolvePeakingShaderParams(PeakingPreset preset)
+{
+    switch (preset) {
+    case PeakingPreset::Low:
+        return {true, false, 0.20f, {1.0f, 0.0f, 0.0f}};
+    case PeakingPreset::Mid:
+        return {true, false, 0.12f, {1.0f, 0.0f, 0.0f}};
+    case PeakingPreset::High:
+        return {true, false, 0.06f, {1.0f, 0.0f, 0.0f}};
+    case PeakingPreset::MonoLow:
+        return {true, true, 0.20f, {1.0f, 0.0f, 0.0f}};
+    case PeakingPreset::MonoMid:
+        return {true, true, 0.12f, {1.0f, 0.0f, 0.0f}};
+    case PeakingPreset::MonoHigh:
+        return {true, true, 0.06f, {1.0f, 0.0f, 0.0f}};
+    case PeakingPreset::Off:
+    default:
+        return {};
+    }
+}
+
 std::array<float, 3> resolveSourceLumaCoefficients(
         bool calibrationEnabled,
         int colorimetry)

@@ -556,8 +556,8 @@ Frame 2.39
 | UI-0 | 完了 | State / Controller、描画変更なし |
 | UI-1 | 完了 | Frame CLEAN化、Runtime Assist Status接続 |
 | UI-2 | 完了 | MENU / LOCK / Touch、UI-only redraw |
-| UI-3 | 実装済み・手動確認待ち | Zebra、Stage 3判定、colorimetry連動 |
-| UI-4 | 未着手 | D-05〜D-07／D-19決定済み |
+| UI-3 | 完了 | Zebra、Stage 3判定、colorimetry連動 |
+| UI-4 | 実装済み・手動確認待ち | Peaking / MONO、4-neighbor Stage 3勾配 |
 | UI-5 | 未着手 | D-08〜D-09／D-19決定済み |
 | UI-5H | 未着手 | D-10／D-11／D-15〜D-17／D-20決定済み |
 | UI-6 | 未着手 | Integration |

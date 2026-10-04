@@ -1836,6 +1836,10 @@ struct PlanarMjpegUniformLocations {
     GLint zebraLow = -1;
     GLint zebraHigh = -1;
     GLint sourceLumaCoefficients = -1;
+    GLint peakingEnabled = -1;
+    GLint peakingMono = -1;
+    GLint peakingThreshold = -1;
+    GLint peakingColor = -1;
 };
 
 static GLuint createPlanarMjpegYuvProgram(
@@ -1882,6 +1886,10 @@ uniform int uZebraEnabled;
 uniform float uZebraLow;
 uniform float uZebraHigh;
 uniform vec3 uSourceLumaCoefficients;
+uniform int uPeakingEnabled;
+uniform int uPeakingMono;
+uniform float uPeakingThreshold;
+uniform vec3 uPeakingColor;
 out vec4 outColor;
 
 // SMPTE ST 2084 (PQ) EOTF. Input is normalized PQ code value.
@@ -1945,33 +1953,45 @@ vec3 linearToSrgb(vec3 c)
     return mix(lo, hi, useHi);
 }
 
-void main()
+// Build the shared calibrated encoded R'G'B' analysis tap (Stage 3).
+// The decoded planar-MJPEG source is normalized from limited-range code
+// values before calibration, so the returned luma domain is 0..1 = 0..100 IRE.
+vec3 sampleAnalysisRgb(vec2 uv)
 {
-    // Planar-MJPEG diagnostics measured the decoded JPEG planes as nominal
-    // BT.601 limited-range codes: Y=16..235, Cb/Cr centered at 128 with
-    // nominal excursion 16..240. Recover nonlinear R'G'B' before optional PQ.
-    float y8 = texture(uY, vUv).r * 255.0;
-    float cb8 = texture(uCb, vUv).r * 255.0;
-    float cr8 = texture(uCr, vUv).r * 255.0;
+    float y8 = texture(uY, uv).r * 255.0;
+    float cb8 = texture(uCb, uv).r * 255.0;
+    float cr8 = texture(uCr, uv).r * 255.0;
 
     float y = (y8 - 16.0) / 219.0;
     float cb = (cb8 - 128.0) / 224.0;
     float cr = (cr8 - 128.0) / 224.0;
 
-    vec3 analysisRgb;
-    analysisRgb.r = y + 1.402000 * cr;
-    analysisRgb.g = y - 0.344136 * cb - 0.714136 * cr;
-    analysisRgb.b = y + 1.772000 * cb;
-    analysisRgb = clamp(analysisRgb, 0.0, 1.0);
+    vec3 rgb;
+    rgb.r = y + 1.402000 * cr;
+    rgb.g = y - 0.344136 * cb - 0.714136 * cr;
+    rgb.b = y + 1.772000 * cb;
+    rgb = clamp(rgb, 0.0, 1.0);
 
     if (uCalibrationEnabled != 0) {
-        analysisRgb = vec3(
-            dot(uCalibrationRow0, analysisRgb),
-            dot(uCalibrationRow1, analysisRgb),
-            dot(uCalibrationRow2, analysisRgb)
+        rgb = vec3(
+            dot(uCalibrationRow0, rgb),
+            dot(uCalibrationRow1, rgb),
+            dot(uCalibrationRow2, rgb)
         ) + uCalibrationOffset;
-        analysisRgb = clamp(analysisRgb, 0.0, 1.0);
+        rgb = clamp(rgb, 0.0, 1.0);
     }
+
+    return rgb;
+}
+
+float sampleAnalysisLuma(vec2 uv)
+{
+    return dot(sampleAnalysisRgb(uv), uSourceLumaCoefficients);
+}
+
+void main()
+{
+    vec3 analysisRgb = sampleAnalysisRgb(vUv);
 
     // Stage 3 analysis and final display are intentionally separate. Assist
     // decisions use calibrated encoded RGB and never use the tone-mapped RGB.
@@ -1986,6 +2006,12 @@ void main()
         displayRgb = linearToSrgb(clamp(rgb709Linear, 0.0, 1.0));
     }
 
+    if (uPeakingEnabled != 0 && uPeakingMono != 0) {
+        const vec3 displayLumaCoefficients =
+            vec3(0.2126, 0.7152, 0.0722);
+        displayRgb = vec3(dot(displayRgb, displayLumaCoefficients));
+    }
+
     if (uZebraEnabled != 0) {
         float sourceVideoLevel =
             dot(analysisRgb, uSourceLumaCoefficients);
@@ -1996,6 +2022,18 @@ void main()
             mod(gl_FragCoord.x + gl_FragCoord.y, 8.0) < 4.0;
         if (zebraHit && zebraStripe) {
             displayRgb = vec3(1.0);
+        }
+    }
+
+    if (uPeakingEnabled != 0) {
+        vec2 texelSize = 1.0 / vec2(textureSize(uY, 0));
+        float left = sampleAnalysisLuma(vUv - vec2(texelSize.x, 0.0));
+        float right = sampleAnalysisLuma(vUv + vec2(texelSize.x, 0.0));
+        float up = sampleAnalysisLuma(vUv - vec2(0.0, texelSize.y));
+        float down = sampleAnalysisLuma(vUv + vec2(0.0, texelSize.y));
+        float edge = abs(right - left) + abs(down - up);
+        if (edge >= uPeakingThreshold) {
+            displayRgb = uPeakingColor;
         }
     }
 
@@ -2052,6 +2090,14 @@ void main()
         uniforms.zebraHigh = glGetUniformLocation(program, "uZebraHigh");
         uniforms.sourceLumaCoefficients =
                 glGetUniformLocation(program, "uSourceLumaCoefficients");
+        uniforms.peakingEnabled =
+                glGetUniformLocation(program, "uPeakingEnabled");
+        uniforms.peakingMono =
+                glGetUniformLocation(program, "uPeakingMono");
+        uniforms.peakingThreshold =
+                glGetUniformLocation(program, "uPeakingThreshold");
+        uniforms.peakingColor =
+                glGetUniformLocation(program, "uPeakingColor");
 
         glUseProgram(program);
         glUniform1i(uniforms.y, 0);
@@ -2060,6 +2106,7 @@ void main()
         glUniform1i(uniforms.pqToSdr, 0);
         glUniform1i(uniforms.calibrationEnabled, 0);
         glUniform1i(uniforms.zebraEnabled, 0);
+        glUniform1i(uniforms.peakingEnabled, 0);
     }
 
     return program;
@@ -4403,6 +4450,11 @@ static void renderLoop(ANativeWindow* window)
                             effective.zebraVisible
                             ? effective.zebra
                             : field_monitor::ZebraPreset::Off);
+            const field_monitor::PeakingShaderParams peaking =
+                    field_monitor::resolvePeakingShaderParams(
+                            effective.peakingVisible
+                            ? effective.peaking
+                            : field_monitor::PeakingPreset::Off);
             const std::array<float, 3> sourceLumaCoefficients =
                     field_monitor::resolveSourceLumaCoefficients(
                             calibration.enabled,
@@ -4416,6 +4468,19 @@ static void renderLoop(ANativeWindow* window)
                     planarMjpegUniforms.sourceLumaCoefficients,
                     1,
                     sourceLumaCoefficients.data());
+            glUniform1i(
+                    planarMjpegUniforms.peakingEnabled,
+                    peaking.enabled ? 1 : 0);
+            glUniform1i(
+                    planarMjpegUniforms.peakingMono,
+                    peaking.mono ? 1 : 0);
+            glUniform1f(
+                    planarMjpegUniforms.peakingThreshold,
+                    peaking.threshold);
+            glUniform3fv(
+                    planarMjpegUniforms.peakingColor,
+                    1,
+                    peaking.color.data());
 
             glBindVertexArray(vao);
             glDrawArrays(GL_TRIANGLES, 0, 3);
