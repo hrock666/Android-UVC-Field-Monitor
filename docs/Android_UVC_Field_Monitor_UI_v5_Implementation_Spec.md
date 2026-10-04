@@ -1,12 +1,12 @@
 # Android UVC Field Monitor
 ## UI v5 実装仕様書 + Preview Assist Shader 疑似コード
 
-Version: UI v5 implementation draft v1.2  
+Version: UI v5
 Basis:
 - `field_monitor_ui_mock_menu_header_v5.html`（UI v5確定モック）
-- `field_monitor_layout(1).h`（最新版レイアウト）
-- `scope_ui(1).cpp`
-- `scope_ui(1).h`
+- `field_monitor_layout.h`
+- `scope_ui.cpp`
+- `scope_ui.h`
 
 ---
 
@@ -20,6 +20,7 @@ Basis:
   - LOW / MID / HIGH
   - MONO LOW / MONO MID / MONO HIGH
 - F3 False Color
+  - OFF / VIDEO / HDR NITS
 - F4 Frame
   - OFF
   - 16:9
@@ -33,7 +34,7 @@ Basis:
   - SAFE AREA ON/OFF
 - Frame OFF時の完全CLEAN Preview
 
-既存の Waveform / RGB Parade / Histogram / Vectorscope のレンダリングロジックは変更対象外とし、UI制御とPreview Assistのみを追加する。
+Waveform / RGB Parade / Histogram / Vectorscopeの集計構造とgeometryは維持する。表示密度のみ、Phase UI-6の確定gainとVectorscope exact 1-bin表示を適用する。
 
 ---
 
@@ -52,6 +53,8 @@ Basis:
 - scope grid / labels / border
 
 Scope用SSBO、maxima SSBO、scope fragment shaderのデータ構造は変更しない。
+
+表示設定はWaveform gain `1.5`、RGB Parade gain `1.5`、Vectorscope gain `1.75`とする。gainは平方根密度変換後に適用して0〜1へclampする。Vectorscopeは3×3 expansionを行わずexact 1-binで描画し、Histogramは変更しない。
 
 ---
 
@@ -759,19 +762,9 @@ ON:
 対象画素に斜線patternを表示
 ```
 
-## 9.1 未確定パラメータ
+## 9.1 判定パラメータ
 
-v5 UIでは以下は確定していない。
-
-- 70/80/90/95/100 を
-  - `>= threshold`
-  - threshold周辺のband
-  のどちらで判定するか
-- band方式の場合の幅
-- IRE→code変換をFULL/LIMITEDでどう統一するか
-- HDR時の評価domain
-
-したがって実装ではUI enumとshader thresholdを分離する。
+70 / 80 / 90 / 95は中心値±3 IRE、100は100 IRE以上を判定する。Stage 3 source video levelをFULLまたはLIMITEDから0〜100 IREへ正規化し、SDR / PQで共通tableを使用する。
 
 ```cpp
 struct ZebraShaderParams {
@@ -781,7 +774,7 @@ struct ZebraShaderParams {
 };
 ```
 
-これによりUIを変更せず判定方式を後から確定できる。
+PQ EOTFとTone MappingはZebra判定へ適用しない。
 
 ---
 
@@ -832,15 +825,9 @@ peakingMono = true
 sensitivity = MID
 ```
 
-## 10.1 未確定パラメータ
+## 10.1 判定パラメータ
 
-v5 UIでは以下は固定していない。
-
-- LOW/MID/HIGHのedge threshold値
-- edge highlight色
-- edge detectorの正規化値
-
-これらは定数テーブルとする。
+4-neighbor gradientへLOW `0.20`、MID `0.12`、HIGH `0.06`を適用し、SDR / PQで共通tableを使用する。edge highlight色は赤とする。
 
 ---
 
@@ -850,10 +837,11 @@ Preset:
 
 ```text
 OFF
-ON
+VIDEO
+HDR NITS
 ```
 
-ON時はPreviewをFalse Color表示へ置換する。
+VIDEOまたはHDR NITS選択時はPreviewをFalse Color表示へ置換する。HDR NITSはPQ Profile時のみ選択可能とする。
 
 v5ではFalse Color ON時、Zebra / Peakingの画素overlayは表示しない。
 
@@ -867,16 +855,9 @@ False Color
 normal / mono preview + Zebra + Peaking
 ```
 
-## 11.1 未確定パラメータ
+## 11.1 判定パラメータ
 
-v5では以下を固定していない。
-
-- False Color IRE境界
-- 各IRE bandのRGB色
-- HDR時のIRE / nit mapping
-- User LUTとの評価順
-
-したがってpaletteはshaderへ直書きせず、テーブル化可能な構造にする。
+VIDEOはRange正規化したStage 3 source video levelを10 bandへ、HDR NITSはStage 3 PQ codeへPQ EOTFを適用したabsolute nitsを11 bandへ割り当てる。境界とpaletteは実装計画書D-08〜D-11を正とする。
 
 ---
 
@@ -1406,15 +1387,13 @@ uniform int   uFalseColorEnabled;
 uniform int   uFalseColorDomain;
 ```
 
-初期実装では:
+初期状態では:
 
 ```cpp
-falseColorDomain = FalseColorDomain::VideoLevel;
+falseColorEnabled = false;
 ```
 
-をデフォルトとする。
-
-`HdrNits` はHDR PQ入力時の将来拡張として設計に含める。
+F3からVIDEO / HDR NITSを手動選択する。非PQ入力ではHDR NITSを選択不可とし、使用中にPQ Profileを解除した場合はVIDEOへ復帰する。
 
 ---
 
@@ -1548,7 +1527,7 @@ enum class FalseColorDomain {
 
 ### VideoLevel
 
-初期実装の標準domain。
+SDR / PQ共通のsource-level domain。
 
 ```text
 Stage 3
@@ -1563,7 +1542,7 @@ SDRおよび通常のsource-level False Colorはこのdomainを使用する。
 
 ### HdrNits
 
-HDR PQ入力用の将来拡張。
+HDR PQ入力用domain。
 
 tap point自体はStage 3のままとし、False Color専用analysis branchだけでPQ EOTFを適用する。
 
@@ -1873,37 +1852,37 @@ case Off:
 case Low:
     enabled = true;
     mono = false;
-    threshold = PEAK_LOW_TBD;
+    threshold = 0.20;
     break;
 
 case Mid:
     enabled = true;
     mono = false;
-    threshold = PEAK_MID_TBD;
+    threshold = 0.12;
     break;
 
 case High:
     enabled = true;
     mono = false;
-    threshold = PEAK_HIGH_TBD;
+    threshold = 0.06;
     break;
 
 case MonoLow:
     enabled = true;
     mono = true;
-    threshold = PEAK_LOW_TBD;
+    threshold = 0.20;
     break;
 
 case MonoMid:
     enabled = true;
     mono = true;
-    threshold = PEAK_MID_TBD;
+    threshold = 0.12;
     break;
 
 case MonoHigh:
     enabled = true;
     mono = true;
-    threshold = PEAK_HIGH_TBD;
+    threshold = 0.06;
     break;
 }
 ```
@@ -1912,7 +1891,7 @@ case MonoHigh:
 
 # 26. Zebra shader helper 疑似コード
 
-判定方式未確定のため、UIから独立したwindowとして渡す。
+判定windowはUI stateから分離してshaderへ渡す。
 
 ```glsl
 bool zebraTest(float y)
@@ -1932,14 +1911,7 @@ ZebraShaderParams resolveZebraPreset(
     SignalDomain domain);
 ```
 
-この関数だけを差し替えれば、
-
-- threshold以上方式
-- ±IRE band方式
-- FULL/LIMITED
-- SDR/HDR
-
-をUI無変更で変更可能。
+70 / 80 / 90 / 95は±3 IRE、100は100 IRE以上へ解決する。FULL / LIMITEDは共通IRE domainへ正規化する。
 
 ---
 
@@ -2017,30 +1989,7 @@ Preview Tone Mapping後RGB
 
 からnitsを逆算しない。
 
-実装候補:
-
-1. 少数bandならuniform array
-2. 1D LUT texture
-3. shader constant table
-
-初期実装:
-
-```text
-VideoLevel domainのみ有効
-```
-
-としてもよい。
-
-ただしコード構造は `HdrNits` branchを後付けしてもshader interfaceを壊さない形にする。
-
-未確定:
-
-- VideoLevel False Color IRE境界
-- VideoLevel False Color palette
-- HDR NITS band境界
-- HDR NITS palette
-
-これらは定数 / テーブル設定とする。
+VideoLevel / HDR NITSともshader内の固定tableを使用し、境界とpaletteは実装計画書D-08〜D-11へ合わせる。
 
 
 ---
@@ -2344,7 +2293,7 @@ Test:
 - performance
 - HDR/SDR path regressなし
 
-Zebra判定ルール確定後にthreshold tableを確定する。
+判定は70 / 80 / 90 / 95を±3 IRE、100を100 IRE以上とする。
 
 ---
 
@@ -2371,13 +2320,12 @@ Test:
 
 実装:
 
-- OFF/ON
-- `FalseColorDomain::VideoLevel`
+- OFF / VIDEO / HDR NITS
+- `FalseColorDomain::VideoLevel / HdrNits`
 - VideoLevel palette mapping
+- PQ EOTF / absolute nits palette mapping
 - False Color ON時Zebra/Peaking visual suppress
-- shader interface上は `FalseColorDomain::HdrNits` を予約
-
-HDR NITS branchは、VideoLevel版の実機確認後に追加可能とする。
+- 非PQ入力でHDR NITSを選択不可
 
 ```text
 Stage 3 PQ
@@ -2397,13 +2345,15 @@ Test:
 - range
 - performance
 
-False Color palette / threshold確定後に進む。
+False Colorの境界とpaletteは実装計画書D-08〜D-11を使用する。
 
 ---
 
 ## Phase UI-6: Integration
 
 全機能組み合わせ。
+
+Scope表示はWaveform gain `1.5`、RGB Parade gain `1.5`、Vectorscope gain `1.75`、Vectorscope exact 1-binとする。
 
 Test matrix:
 
@@ -2451,7 +2401,7 @@ MENU描画は既存 `uiVbo_ + GL_STREAM_DRAW` の範囲で追加し、別Surface
 以下を満たすまで次Phaseへ進まない。
 
 ```text
-1. Scope値が変わらない
+1. Scope集計値とgeometryが変わらず、確定済みtrace gainが適用される
 2. Waveform位置が変わらない
 3. Parade位置が変わらない
 4. Histogram位置が変わらない
@@ -2480,7 +2430,7 @@ MENU描画は既存 `uiVbo_ + GL_STREAM_DRAW` の範囲で追加し、別Surface
 - F1-F4
 - F1 preset一覧
 - F2 preset一覧
-- F3 OFF/ON
+- F3 OFF / VIDEO / HDR NITS
 - F4 preset一覧
 - Frame OFF時はCross / Safe / Aspectを描画しない
 - Runtime Statusは「現在Previewに実際に掛かっているAssist」を表示
@@ -2502,18 +2452,7 @@ MENU描画は既存 `uiVbo_ + GL_STREAM_DRAW` の範囲で追加し、別Surface
 
 ## 未確定
 
-- Zebra threshold semantics
-- Zebra band width
-- Zebra SDR/HDR threshold table
-- Peaking LOW/MID/HIGH threshold
-- Peaking SDR/PQ threshold table
-- Peaking highlight RGB
-- VideoLevel False Color palette
-- VideoLevel False Color IRE boundaries
-- HDR NITS False Color band boundaries
-- HDR NITS False Color palette
-
-これらはUI state / tap pointから分離し、後から定数/テーブルだけで確定できる設計とする。
+なし。最終値は実装計画書の決定一覧D-01〜D-22を正とする。
 
 ---
 

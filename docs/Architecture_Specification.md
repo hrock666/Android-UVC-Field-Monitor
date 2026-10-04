@@ -761,10 +761,10 @@ Right : code 0 / 64 / 128 / 191 / 255
 
 1280 source pixelを720 waveform X座標へdown-mapして表示する。
 
-表示密度は平方根変換とし、入力高と同じ720 samples / source columnを基準にする。
+表示密度は平方根変換後にgain 1.5を適用し、入力高と同じ720 samples / source columnを基準にする。
 
 ```text
-intensity = sqrt(count / 720)
+intensity = clamp(1.5 * sqrt(count / 720), 0, 1)
 ```
 
 HDR/PQ時もWaveformはsource code geometryを維持する。
@@ -781,7 +781,7 @@ Parade plot : 224 × 161
 
 Tone Mapping後のPreview RGBを測定しない。
 
-R/G/Bごとにframe内最大binで正規化し、表示密度は平方根変換する。Graticuleを先に描き、Parade信号を最後に合成する。
+R/G/Bごとにframe内最大binで正規化し、平方根変換後にgain 1.5を適用する。Graticuleを先に描き、Parade信号を最後に合成する。
 
 ---
 
@@ -827,7 +827,7 @@ Cr = (code - 128) / 224
 - G
 - Y
 
-100% target geometryを維持し、target座標と測定座標は同じchroma scale 117を使用する。表示密度はframe内最大bin基準の平方根変換とする。Graticuleを先に描き、測定信号を最後に合成する。
+100% target geometryを維持し、target座標と測定座標は同じchroma scale 117を使用する。表示密度はframe内最大bin基準の平方根変換後にgain 1.75を適用する。測定信号は3×3へ拡張せず、該当Cb/Cr binをexact 1-binで描画する。Graticuleを先に描き、測定信号を最後に合成する。
 
 Mali-G57互換性のため、readonly SSBO elementを関数へ直接渡さず、一度local variableへコピーする。
 
@@ -872,6 +872,15 @@ Front Buffer pathでも同じ思想を維持し、Preview present/submissionを�
 - zebra
 - peaking
 - false color
+
+右上の`MENU`から`LOCK`とF1〜F4を操作する。
+
+- F1: Zebra `OFF / 70 / 80 / 90 / 95 / 100 IRE`
+- F2: Peaking `OFF / LOW / MID / HIGH`およびMONO
+- F3: False Color `OFF / VIDEO / HDR NITS`
+- F4: Frame aspect、Center Cross、90% Safe Area
+
+HDR NITSはPQ Profile時のみ選択できる。False Color表示中はZebra / Peakingのvisual outputを抑制するが、保存状態は維持する。
 
 映像外へ置くもの：
 

@@ -23,7 +23,7 @@ Version: implementation plan v1.1
 - Runtime Assist Status
 - Frame OFF時の完全CLEAN Preview
 
-既存のWaveform / RGB Parade / Histogram / Vectorscopeのデータ構造と解析・描画ロジックは変更しない。
+Waveform / RGB Parade / Histogram / Vectorscopeの集計構造とgeometryは維持する。UI-6では表示密度gainとVectorscopeのbin描画だけを確定値へ調整する。
 
 ---
 

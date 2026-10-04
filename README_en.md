@@ -94,10 +94,23 @@ Currently implemented:
 The scopes are intended for field exposure checks, signal-level checks, and color-distribution monitoring directly on an Android device.
 
 - The waveform uses a fixed full-range scale: `0 / 25 / 50 / 75 / 100 %` and `code 0 / 64 / 128 / 191 / 255`.
-- Waveform, RGB Parade, and Vectorscope use square-root density rendering. The waveform reference population is 720 source rows.
+- Waveform, RGB Parade, and Vectorscope use square-root density rendering with gains of `1.5 / 1.5 / 1.75`, respectively. The waveform reference population is 720 source rows.
 - The per-channel square-root histogram emphasizes clipping bins at code 0 and 255.
-- Vectorscope targets remain at 100%, while BT.601 / BT.709 / BT.2020 chroma coefficients follow the loaded profile.
+- The vectorscope uses exact one-bin rendering and 100% targets, while BT.601 / BT.709 / BT.2020 chroma coefficients follow the loaded profile.
 - Graticules are drawn before measured traces so signals remain visible at intersections.
+
+---
+
+### Monitor UI / Preview Assist
+
+Open `MENU` in the upper-right corner, release `LOCK`, and use F1–F4 to select an assist. Tap the same function key again to cycle its main preset, or select a preset directly from the list on the left.
+
+- F1 Zebra: `OFF / 70 / 80 / 90 / 95 / 100 IRE`
+- F2 Peaking: `OFF / LOW / MID / HIGH` plus MONO variants, with red edge highlights
+- F3 False Color: `OFF / VIDEO / HDR NITS`; HDR NITS is available only with a PQ profile
+- F4 Frame: `OFF / 16:9 / 1.85 / 2.00 / 2.39 / 4:3 / 1:1 / 9:16`, Center Cross, and 90% Safe Area
+
+False Color suppresses the visible Zebra and Peaking overlays without discarding their selected states.
 
 ---
 

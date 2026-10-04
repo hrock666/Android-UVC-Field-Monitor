@@ -100,10 +100,23 @@ Scope側にはPQ EOTF / Tone Mappingを入れず、Capture補正後のcode-domai
 フィールドでの露出確認、レベル確認、色分布確認をAndroid端末単体で行うことを目的としています。
 
 - WaveformはFull Range固定で、左に`0 / 25 / 50 / 75 / 100 %`、右に`code 0 / 64 / 128 / 191 / 255`を表示
-- Waveform / RGB Parade / Vectorscopeは平方根密度表示。Waveformの密度基準は入力高と同じ720 sample
+- Waveform / RGB Parade / Vectorscopeは平方根密度表示。表示gainは順に`1.5 / 1.5 / 1.75`で、Waveformの密度基準は入力高と同じ720 sample
 - HistogramはR/G/Bチャンネル別の平方根表示で、code 0 / 255のクリッピングbinを強調
-- Vectorscopeは100% targetを維持し、ProfileのBT.601 / BT.709 / BT.2020色度係数を使用
+- Vectorscopeはexact 1-bin表示で100% targetを維持し、ProfileのBT.601 / BT.709 / BT.2020色度係数を使用
 - Graticuleを先に、測定信号を最後に描画するため、交点でも信号を確認可能
+
+---
+
+### モニターUI / Preview Assist
+
+画面右上の`MENU`から`LOCK`を解除し、F1〜F4でAssistを選択します。同じFキーの再タップでpresetを切り替え、左側の一覧から直接選択することもできます。
+
+- F1 Zebra: `OFF / 70 / 80 / 90 / 95 / 100 IRE`
+- F2 Peaking: `OFF / LOW / MID / HIGH`と各MONO表示。輪郭色は赤
+- F3 False Color: `OFF / VIDEO / HDR NITS`。HDR NITSはPQ Profile時のみ選択可能
+- F4 Frame: `OFF / 16:9 / 1.85 / 2.00 / 2.39 / 4:3 / 1:1 / 9:16`、Center Cross、90% Safe Area
+
+False Color表示中はZebra / Peakingの表示だけを抑制し、選択状態は保持します。
 
 ---
 
