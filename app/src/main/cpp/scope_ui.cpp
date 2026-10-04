@@ -1,4 +1,5 @@
 #include "scope_ui.h"
+#include "monitor_ui_controller.h"
 
 #include <android/log.h>
 
@@ -1001,6 +1002,7 @@ void ScopeUi::drawOverlay(
         int calibrationHeight,
         bool calibrationLimited,
         int vectorColorimetry,
+        const MonitorUiRenderState& uiState,
         GLuint vao)
 {
     std::vector<UiVertex> vertices;
@@ -1256,10 +1258,10 @@ void ScopeUi::drawOverlay(
         };
 
         const UiColor guide{
-                235.0f / 255.0f,
-                235.0f / 255.0f,
-                235.0f / 255.0f,
-                190.0f / 255.0f
+                1.0f,
+                1.0f,
+                1.0f,
+                1.0f
         };
 
         const UiColor bar{
@@ -1279,6 +1281,10 @@ void ScopeUi::drawOverlay(
         const RectI& paradePanel = layout.parade;
         const RectI& histPanel = layout.histogram;
         const RectI& vectorPanel = layout.vectorscope;
+        const EffectivePreviewState effective =
+                resolveEffectivePreviewState(uiState.assist);
+        const std::string runtimeAssistText =
+                buildRuntimeAssistText(effective);
 
         addRect(
                 static_cast<float>(inputStatus.x),
@@ -1366,7 +1372,7 @@ void ScopeUi::drawOverlay(
         addText(
                 runtimeStatus.x + 12,
                 runtimeStatus.y + 7,
-                "CLEAN",
+                runtimeAssistText,
                 previewText,
                 1
         );
@@ -1389,79 +1395,96 @@ void ScopeUi::drawOverlay(
         );
 
 
-        // Optical overlays remain inside the source image only.
-        const int mx = preview.x + preview.width / 2;
-        const int my = preview.y + preview.height / 2;
+        // Frame guides are state-driven. Frame OFF is a complete mask: the
+        // stored aspect, Cross, and Safe values remain untouched but nothing
+        // is drawn inside the Preview.
+        if (effective.frameVisible) {
+            const MonitorRectF previewRect{
+                    static_cast<float>(preview.x),
+                    static_cast<float>(preview.y),
+                    static_cast<float>(preview.width),
+                    static_cast<float>(preview.height),
+            };
+            const MonitorRectF frame =
+                    calculateFrameRect(
+                            previewRect,
+                            effective.frameAspect);
 
-        addRect(
-                static_cast<float>(mx - 12),
-                static_cast<float>(my),
-                25.0f,
-                1.0f,
-                guide
-        );
+            addRect(frame.x, frame.y, frame.width, 1.0f, guide);
+            addRect(
+                    frame.x,
+                    frame.y + frame.height - 1.0f,
+                    frame.width,
+                    1.0f,
+                    guide);
+            addRect(frame.x, frame.y, 1.0f, frame.height, guide);
+            addRect(
+                    frame.x + frame.width - 1.0f,
+                    frame.y,
+                    1.0f,
+                    frame.height,
+                    guide);
 
-        addRect(
-                static_cast<float>(mx),
-                static_cast<float>(my - 12),
-                1.0f,
-                25.0f,
-                guide
-        );
+            if (effective.centerCrossVisible) {
+                const int mx = preview.x + preview.width / 2;
+                const int my = preview.y + preview.height / 2;
 
-        const int safeX =
-                preview.x +
-                static_cast<int>(
-                        std::lround(preview.width * 0.05)
-                );
+                addRect(
+                        static_cast<float>(mx - 12),
+                        static_cast<float>(my),
+                        25.0f,
+                        1.0f,
+                        guide);
+                addRect(
+                        static_cast<float>(mx),
+                        static_cast<float>(my - 12),
+                        1.0f,
+                        25.0f,
+                        guide);
+            }
 
-        const int safeY =
-                preview.y +
-                static_cast<int>(
-                        std::lround(preview.height * 0.05)
-                );
+            if (effective.safeAreaVisible) {
+                const int safeX =
+                        preview.x +
+                        static_cast<int>(
+                                std::lround(preview.width * 0.05));
+                const int safeY =
+                        preview.y +
+                        static_cast<int>(
+                                std::lround(preview.height * 0.05));
+                const int safeW =
+                        static_cast<int>(
+                                std::lround(preview.width * 0.90));
+                const int safeH =
+                        static_cast<int>(
+                                std::lround(preview.height * 0.90));
 
-        const int safeW =
-                static_cast<int>(
-                        std::lround(preview.width * 0.90)
-                );
-
-        const int safeH =
-                static_cast<int>(
-                        std::lround(preview.height * 0.90)
-                );
-
-        addRect(
-                static_cast<float>(safeX),
-                static_cast<float>(safeY),
-                static_cast<float>(safeW),
-                1.0f,
-                guide
-        );
-
-        addRect(
-                static_cast<float>(safeX),
-                static_cast<float>(safeY + safeH - 1),
-                static_cast<float>(safeW),
-                1.0f,
-                guide
-        );
-
-        addRect(
-                static_cast<float>(safeX),
-                static_cast<float>(safeY),
-                1.0f,
-                static_cast<float>(safeH),
-                guide
-        );
-
-        addRect(
-                static_cast<float>(safeX + safeW - 1),
-                static_cast<float>(safeY),
-                1.0f,
-                static_cast<float>(safeH),
-                guide
-        );
+                addRect(
+                        static_cast<float>(safeX),
+                        static_cast<float>(safeY),
+                        static_cast<float>(safeW),
+                        1.0f,
+                        guide);
+                addRect(
+                        static_cast<float>(safeX),
+                        static_cast<float>(safeY + safeH - 1),
+                        static_cast<float>(safeW),
+                        1.0f,
+                        guide);
+                addRect(
+                        static_cast<float>(safeX),
+                        static_cast<float>(safeY),
+                        1.0f,
+                        static_cast<float>(safeH),
+                        guide);
+                addRect(
+                        static_cast<float>(safeX + safeW - 1),
+                        static_cast<float>(safeY),
+                        1.0f,
+                        static_cast<float>(safeH),
+                        guide);
+            }
+        }
 
 
         // Scope panel borders.

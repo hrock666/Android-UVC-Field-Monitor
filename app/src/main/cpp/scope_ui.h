@@ -1,6 +1,7 @@
 #pragma once
 
 #include "field_monitor_layout.h"
+#include "monitor_ui_state.h"
 
 #include <GLES3/gl31.h>
 
@@ -57,6 +58,7 @@ public:
             int calibrationHeight,
             bool calibrationLimited,
             int vectorColorimetry,
+            const MonitorUiRenderState& uiState,
             GLuint vao);
 
     void shutdown();

@@ -16,6 +16,7 @@
 #include "uvc_stream.h"
 #include "uvc_mjpeg_decoder.h"
 #include "field_monitor_layout.h"
+#include "monitor_ui_controller.h"
 #include "scope_ui.h"
 #include "scope_gpu.h"
 #include "diagnostic_config.h"
@@ -3905,6 +3906,8 @@ static void renderLoop(ANativeWindow* window)
     // --------------------------------------------------------
 
     field_monitor::ScopeUi scopeUi;
+    field_monitor::MonitorUiController& monitorUi =
+            field_monitor::monitorUiController();
 
     if (!scopeUi.initialize()) {
         gRunning = false;
@@ -3932,6 +3935,10 @@ static void renderLoop(ANativeWindow* window)
     auto drawStartupUiShell = [&]() {
         const calibration_profile::Profile startupCalibration =
                 calibration_profile::snapshot();
+        monitorUi.setHdrNitsAvailable(
+                startupCalibration.enabled && startupCalibration.pqInput);
+        const field_monitor::MonitorUiSnapshot uiSnapshot =
+                monitorUi.snapshot();
         glViewport(0, 0, width, height);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -3948,6 +3955,7 @@ static void renderLoop(ANativeWindow* window)
                 startupCalibration.enabled
                         ? startupCalibration.colorimetry
                         : 0,
+                uiSnapshot.state,
                 vao
         );
     };
@@ -4391,6 +4399,10 @@ static void renderLoop(ANativeWindow* window)
 
         const calibration_profile::Profile calibration =
                 calibration_profile::snapshot();
+        monitorUi.setHdrNitsAvailable(
+                calibration.enabled && calibration.pqInput);
+        const field_monitor::MonitorUiSnapshot uiSnapshot =
+                monitorUi.snapshot();
         glUniform1i(
                 glGetUniformLocation(planarMjpegProgram, "uCalibrationEnabled"),
                 calibration.enabled ? 1 : 0);
@@ -4435,7 +4447,8 @@ static void renderLoop(ANativeWindow* window)
                 vao
         );
 
-        // Draw the grid, labels, safe guide and scope graticules before the
+        // Draw the grid, labels, state-driven frame guides, and scope
+        // graticules before the
         // waveform, parade and vectorscope so samples that coincide with a
         // grid line remain visible.
         scopeUi.drawOverlay(
@@ -4449,6 +4462,7 @@ static void renderLoop(ANativeWindow* window)
                 calibration.height,
                 calibration.limitedInput,
                 calibration.enabled ? calibration.colorimetry : 0,
+                uiSnapshot.state,
                 vao
         );
 

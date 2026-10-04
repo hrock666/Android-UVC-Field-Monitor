@@ -1,9 +1,5 @@
 #include "monitor_ui_controller.h"
 
-#include <sstream>
-#include <utility>
-#include <vector>
-
 namespace field_monitor {
 namespace {
 
@@ -177,19 +173,30 @@ EffectivePreviewState resolveEffectivePreviewState(
 std::string buildRuntimeAssistText(
         const EffectivePreviewState& effective)
 {
-    std::vector<std::string> parts;
-    parts.reserve(4);
+    std::string text;
+    text.reserve(64);
+
+    const auto appendPart =
+            [&](const std::string& part) {
+        if (part.empty()) {
+            return;
+        }
+        if (!text.empty()) {
+            text += "  ";
+        }
+        text += part;
+    };
 
     if (effective.zebraVisible) {
-        parts.emplace_back(zebraRuntimeText(effective.zebra));
+        appendPart(zebraRuntimeText(effective.zebra));
     }
 
     if (effective.peakingVisible) {
-        parts.emplace_back(peakingRuntimeText(effective.peaking));
+        appendPart(peakingRuntimeText(effective.peaking));
     }
 
     if (effective.falseColorVisible) {
-        parts.emplace_back(falseColorRuntimeText(effective.falseColor));
+        appendPart(falseColorRuntimeText(effective.falseColor));
     }
 
     if (effective.frameVisible) {
@@ -201,21 +208,13 @@ std::string buildRuntimeAssistText(
         if (effective.safeAreaVisible) {
             frameText += " S";
         }
-        parts.push_back(std::move(frameText));
+        appendPart(frameText);
     }
 
-    if (parts.empty()) {
+    if (text.empty()) {
         return "CLEAN";
     }
-
-    std::ostringstream text;
-    for (std::size_t index = 0; index < parts.size(); ++index) {
-        if (index != 0) {
-            text << "  ";
-        }
-        text << parts[index];
-    }
-    return text.str();
+    return text;
 }
 
 float frameAspectValue(FrameAspect aspect)

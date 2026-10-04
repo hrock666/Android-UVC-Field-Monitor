@@ -550,8 +550,8 @@ Frame 2.39
 
 | Phase | 状態 | 備考 |
 |---|---|---|
-| UI-0 | 実装済み・手動確認待ち | State / Controller、描画変更なし |
-| UI-1 | 未着手 | Frame CLEAN化 |
+| UI-0 | 完了 | State / Controller、描画変更なし |
+| UI-1 | 実装済み・手動確認待ち | Frame CLEAN化、Runtime Assist Status接続 |
 | UI-2 | 未着手 | MENU / LOCK / Touch、D-12〜D-14／D-16決定済み |
 | UI-3 | 未着手 | D-01〜D-04／D-18／D-19決定済み |
 | UI-4 | 未着手 | D-05〜D-07／D-19決定済み |
