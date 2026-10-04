@@ -1844,6 +1844,8 @@ struct PlanarMjpegUniformLocations {
     GLint falseColorDomain = -1;
     GLint falseColorVideoBoundaries = -1;
     GLint falseColorVideoPalette = -1;
+    GLint falseColorHdrNitsBoundaries = -1;
+    GLint falseColorHdrNitsPalette = -1;
 };
 
 static GLuint createPlanarMjpegYuvProgram(
@@ -1898,6 +1900,8 @@ uniform int uFalseColorEnabled;
 uniform int uFalseColorDomain;
 uniform float uFalseColorVideoBoundaries[9];
 uniform vec3 uFalseColorVideoPalette[10];
+uniform float uFalseColorHdrNitsBoundaries[10];
+uniform vec3 uFalseColorHdrNitsPalette[11];
 out vec4 outColor;
 
 // SMPTE ST 2084 (PQ) EOTF. Input is normalized PQ code value.
@@ -2007,15 +2011,39 @@ vec3 mapVideoLevelFalseColor(float sourceVideoLevel)
     return uFalseColorVideoPalette[band];
 }
 
+vec3 mapHdrNitsFalseColor(float nits)
+{
+    int band = 0;
+    for (int index = 0; index < 10; ++index) {
+        if (nits >= uFalseColorHdrNitsBoundaries[index]) {
+            band = index + 1;
+        }
+    }
+    return uFalseColorHdrNitsPalette[band];
+}
+
 void main()
 {
     vec3 analysisRgb = sampleAnalysisRgb(vUv);
     float analysisY = dot(analysisRgb, uSourceLumaCoefficients);
 
-    // VideoLevel False Color has highest visual priority and is evaluated
-    // directly in the normalized Stage 3 source domain.
-    if (uFalseColorEnabled != 0 && uFalseColorDomain == 0) {
-        outColor = vec4(mapVideoLevelFalseColor(analysisY), 1.0);
+    // False Color has highest visual priority. VideoLevel uses normalized
+    // Stage 3 source luma. HDR NITS applies PQ EOTF directly to Stage 3 and
+    // derives absolute linear BT.2020 luminance without preview tone mapping.
+    if (uFalseColorEnabled != 0) {
+        vec3 falseColor;
+        if (uFalseColorDomain == 0) {
+            falseColor = mapVideoLevelFalseColor(analysisY);
+        }
+        else {
+            const vec3 linearBt2020LumaCoefficients =
+                vec3(0.2627, 0.6780, 0.0593);
+            vec3 rgbNits = pqEotfNits(analysisRgb);
+            float luminanceNits =
+                dot(rgbNits, linearBt2020LumaCoefficients);
+            falseColor = mapHdrNitsFalseColor(luminanceNits);
+        }
+        outColor = vec4(falseColor, 1.0);
         return;
     }
 
@@ -2132,6 +2160,12 @@ void main()
                         "uFalseColorVideoBoundaries[0]");
         uniforms.falseColorVideoPalette =
                 glGetUniformLocation(program, "uFalseColorVideoPalette[0]");
+        uniforms.falseColorHdrNitsBoundaries =
+                glGetUniformLocation(
+                        program,
+                        "uFalseColorHdrNitsBoundaries[0]");
+        uniforms.falseColorHdrNitsPalette =
+                glGetUniformLocation(program, "uFalseColorHdrNitsPalette[0]");
 
         glUseProgram(program);
         glUniform1i(uniforms.y, 0);
@@ -2142,6 +2176,29 @@ void main()
         glUniform1i(uniforms.zebraEnabled, 0);
         glUniform1i(uniforms.peakingEnabled, 0);
         glUniform1i(uniforms.falseColorEnabled, 0);
+
+        const field_monitor::FalseColorShaderTables& falseColorTables =
+                field_monitor::falseColorShaderTables();
+        glUniform1fv(
+                uniforms.falseColorVideoBoundaries,
+                static_cast<GLsizei>(
+                        falseColorTables.videoBoundaries.size()),
+                falseColorTables.videoBoundaries.data());
+        glUniform3fv(
+                uniforms.falseColorVideoPalette,
+                static_cast<GLsizei>(
+                        field_monitor::FALSE_COLOR_VIDEO_BAND_COUNT),
+                falseColorTables.videoPalette.data());
+        glUniform1fv(
+                uniforms.falseColorHdrNitsBoundaries,
+                static_cast<GLsizei>(
+                        falseColorTables.hdrNitsBoundaries.size()),
+                falseColorTables.hdrNitsBoundaries.data());
+        glUniform3fv(
+                uniforms.falseColorHdrNitsPalette,
+                static_cast<GLsizei>(
+                        field_monitor::FALSE_COLOR_HDR_BAND_COUNT),
+                falseColorTables.hdrNitsPalette.data());
     }
 
     return program;
@@ -4527,16 +4584,6 @@ static void renderLoop(ANativeWindow* window)
             glUniform1i(
                     planarMjpegUniforms.falseColorDomain,
                     static_cast<GLint>(falseColor.domain));
-            glUniform1fv(
-                    planarMjpegUniforms.falseColorVideoBoundaries,
-                    static_cast<GLsizei>(
-                            falseColor.videoBoundaries.size()),
-                    falseColor.videoBoundaries.data());
-            glUniform3fv(
-                    planarMjpegUniforms.falseColorVideoPalette,
-                    static_cast<GLsizei>(
-                            field_monitor::FALSE_COLOR_VIDEO_BAND_COUNT),
-                    falseColor.videoPalette.data());
 
             glBindVertexArray(vao);
             glDrawArrays(GL_TRIANGLES, 0, 3);

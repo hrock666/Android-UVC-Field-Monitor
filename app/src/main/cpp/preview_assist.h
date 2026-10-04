@@ -27,12 +27,19 @@ enum class FalseColorDomain : int {
 
 static constexpr std::size_t FALSE_COLOR_VIDEO_BOUNDARY_COUNT = 9;
 static constexpr std::size_t FALSE_COLOR_VIDEO_BAND_COUNT = 10;
+static constexpr std::size_t FALSE_COLOR_HDR_BOUNDARY_COUNT = 10;
+static constexpr std::size_t FALSE_COLOR_HDR_BAND_COUNT = 11;
 
 struct FalseColorShaderParams {
     bool enabled = false;
     FalseColorDomain domain = FalseColorDomain::VideoLevel;
+};
+
+struct FalseColorShaderTables {
     std::array<float, FALSE_COLOR_VIDEO_BOUNDARY_COUNT> videoBoundaries{};
     std::array<float, FALSE_COLOR_VIDEO_BAND_COUNT * 3> videoPalette{};
+    std::array<float, FALSE_COLOR_HDR_BOUNDARY_COUNT> hdrNitsBoundaries{};
+    std::array<float, FALSE_COLOR_HDR_BAND_COUNT * 3> hdrNitsPalette{};
 };
 
 // Zebra thresholds are expressed in normalized source video level, where
@@ -43,6 +50,8 @@ ZebraShaderParams resolveZebraShaderParams(ZebraPreset preset);
 PeakingShaderParams resolvePeakingShaderParams(PeakingPreset preset);
 
 FalseColorShaderParams resolveFalseColorShaderParams(FalseColorMode mode);
+
+const FalseColorShaderTables& falseColorShaderTables();
 
 // 0=BT.601, 1=BT.709, 2=BT.2020. A disabled profile always resolves to
 // BT.601, matching the planar-MJPEG source reconstruction fallback.

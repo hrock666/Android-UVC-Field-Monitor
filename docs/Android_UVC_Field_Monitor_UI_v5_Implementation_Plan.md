@@ -558,7 +558,7 @@ Frame 2.39
 | UI-2 | 完了 | MENU / LOCK / Touch、UI-only redraw |
 | UI-3 | 完了 | Zebra、Stage 3判定、colorimetry連動 |
 | UI-4 | 完了 | Peaking / MONO、4-neighbor Stage 3勾配 |
-| UI-5 | 実装済み・手動確認待ち | VideoLevel False Color、10 band palette |
-| UI-5H | 未着手 | D-10／D-11／D-15〜D-17／D-20決定済み |
+| UI-5 | 完了 | VideoLevel False Color、10 band palette |
+| UI-5H | 実装済み・手動確認待ち | PQ EOTF、absolute nits、11 band palette |
 | UI-6 | 未着手 | Integration |
 

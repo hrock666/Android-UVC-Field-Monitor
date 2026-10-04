@@ -67,14 +67,18 @@ PeakingShaderParams resolvePeakingShaderParams(PeakingPreset preset)
 
 FalseColorShaderParams resolveFalseColorShaderParams(FalseColorMode mode)
 {
-    FalseColorShaderParams params{};
-    params.enabled = mode != FalseColorMode::Off;
-    params.domain =
+    return {
+            mode != FalseColorMode::Off,
             mode == FalseColorMode::HdrNits
             ? FalseColorDomain::HdrNits
-            : FalseColorDomain::VideoLevel;
+            : FalseColorDomain::VideoLevel,
+    };
+}
 
-    params.videoBoundaries = {
+const FalseColorShaderTables& falseColorShaderTables()
+{
+    static const FalseColorShaderTables tables{
+        {
             0.00f,
             0.05f,
             0.20f,
@@ -84,8 +88,8 @@ FalseColorShaderParams resolveFalseColorShaderParams(FalseColorMode mode)
             0.85f,
             0.95f,
             1.00f,
-    };
-    params.videoPalette = {
+        },
+        {
             0.35f, 0.00f, 0.50f,  // < 0 IRE: Dark Purple
             0.55f, 0.00f, 0.80f,  // 0..5 IRE: Purple
             0.00f, 0.15f, 1.00f,  // 5..20 IRE: Blue
@@ -96,8 +100,34 @@ FalseColorShaderParams resolveFalseColorShaderParams(FalseColorMode mode)
             1.00f, 0.50f, 0.00f,  // 85..95 IRE: Orange
             1.00f, 0.00f, 0.00f,  // 95..100 IRE: Red
             1.00f, 1.00f, 1.00f,  // >= 100 IRE: White
+        },
+        {
+            0.1f,
+            1.0f,
+            10.0f,
+            26.0f,
+            100.0f,
+            203.0f,
+            400.0f,
+            1000.0f,
+            4000.0f,
+            10000.0f,
+        },
+        {
+            0.00f, 0.00f, 0.00f,  // 0..0.1 nits: Black
+            0.35f, 0.00f, 0.50f,  // 0.1..1 nits: Dark Purple
+            0.00f, 0.15f, 1.00f,  // 1..10 nits: Blue
+            0.00f, 0.80f, 1.00f,  // 10..26 nits: Cyan
+            0.00f, 1.00f, 0.00f,  // 26..100 nits: Green
+            0.45f, 0.45f, 0.45f,  // 100..203 nits: Gray
+            1.00f, 1.00f, 0.00f,  // 203..400 nits: Yellow
+            1.00f, 0.50f, 0.00f,  // 400..1000 nits: Orange
+            1.00f, 0.00f, 0.00f,  // 1000..4000 nits: Red
+            1.00f, 0.00f, 1.00f,  // 4000..10000 nits: Magenta
+            1.00f, 1.00f, 1.00f,  // >= 10000 nits: White
+        },
     };
-    return params;
+    return tables;
 }
 
 std::array<float, 3> resolveSourceLumaCoefficients(
